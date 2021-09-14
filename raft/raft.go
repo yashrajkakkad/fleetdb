@@ -72,7 +72,12 @@ type Raft struct {
 	matchIndex []int
 
 	// Other variables
-
+	// state is the current state of the server
+	// at a single time, a server can  be:
+	// Follower
+	// Candidate
+	// Leader
+	state string
 }
 
 type Log struct {
@@ -82,11 +87,8 @@ type Log struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here (2A).
-	return term, isleader
+	// do we need locks here?
+	return rf.currentTerm, rf.state == "Leader"
 }
 
 //
@@ -133,8 +135,8 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term        int
-	candidateId int
+	Term        int
+	CandidateId int
 }
 
 //
@@ -143,8 +145,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term        int
-	voteGranted bool
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -152,33 +154,33 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	if args.term < rf.currentTerm {
-		reply.voteGranted = false
-	} else if rf.votedFor == -1 || rf.votedFor == args.candidateId { // -1 is null for now
-		reply.voteGranted = true
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+	} else if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // -1 is null for now
+		reply.VoteGranted = true
 	} else {
-		reply.voteGranted = false
+		reply.VoteGranted = false
 	}
-	reply.term = rf.currentTerm
+	reply.Term = rf.currentTerm
 }
 
 type AppendEntriesArgs struct {
-	term     int
-	leaderId int
+	Term     int
+	LeaderId int
 }
 
 type AppendEntriesReply struct {
-	term    int
-	success bool
+	Term    int
+	Success bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.term < rf.currentTerm {
-		reply.success = false
+	if args.Term < rf.currentTerm {
+		reply.Success = false
 	} else {
-		reply.success = true
+		reply.Success = true
 	}
-	reply.term = rf.currentTerm
+	reply.Term = rf.currentTerm
 }
 
 //
