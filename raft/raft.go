@@ -18,8 +18,10 @@ package raft
 //
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/yashrajkakkad/fleetdb/labrpc"
 )
@@ -72,7 +74,7 @@ type Raft struct {
 	matchIndex []int
 
 	// Other variables
-
+	lastHeard        time.Time
 }
 
 type Log struct {
@@ -279,9 +281,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	// go func() {
-
-	// }
+	go func() {
+		for {
+			electionTimeout := time.Duration(100 * time.Millisecond()) // should be randomly generated
+			if time.Now().Sub(rf.lastHeard) > electionTimeout {
+				// kick off election
+			}
+		}
+	}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
