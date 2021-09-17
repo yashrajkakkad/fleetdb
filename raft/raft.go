@@ -75,12 +75,24 @@ type Raft struct {
 
 	// Other variables
 	lastHeard time.Time
-	// state is the current state of the server
-	// at a single time, a server can  be:
-	// Follower
-	// Candidate
-	// Leader
+	/*
+		   state is the current state of the server
+		   at a single time, a server can  be:
+			Follower
+		    Candidate
+		   	Leader
+	*/
 	state string
+	// total voteRecieved by the candidate, if more than half --> leader
+	voteRecieved int
+
+	// channels for communication
+	// sent by the leader to rest of the servers
+	heartBeat chan bool
+	// send to candidate if we win election i.e received more than half of the votes
+	winner chan bool
+	// election timeout: if this is true, there exists no leader, turn the follower->candidate
+	electionTimout chan bool
 }
 
 type Log struct {
@@ -91,6 +103,8 @@ type Log struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// do we need locks here?
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == "Leader"
 }
 
@@ -158,20 +172,28 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// Should this be done only if a server is a follower?
+	rf.mu.Lock()
+	// if candidate is behind, do not grant vote
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
 	} else if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // -1 is null for now
 		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId // give vote
+		rf.state = "Follower"          // change state to follower (what if a candidate receives request vote rpc?)
 	} else {
 		reply.VoteGranted = false
 	}
 
 	if args.Term > rf.currentTerm { // Convert to follower
 		rf.currentTerm = args.Term
-		rf.state = "follower"
+		rf.state = "Follower"
+		rf.votedFor = -1
 	}
 
 	reply.Term = rf.currentTerm
+	rf.mu.Unlock()
 }
 
 type AppendEntriesArgs struct {
@@ -185,7 +207,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if rf.state == "leader" { // A leader ignores AppendEntries RPCs
+	if rf.state == "Leader" { // A leader ignores AppendEntries RPCs
 		return
 	}
 	rf.lastHeard = time.Now()
@@ -195,7 +217,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		if args.Term > rf.currentTerm { // Convert to follower
 			rf.currentTerm = args.Term
-			rf.state = "follower"
+			rf.state = "Follower"
 		}
 	}
 	reply.Term = rf.currentTerm
@@ -232,6 +254,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if ok {
+		// if the currentTerm is less than other server's term, update term and become follower
+		if rf.currentTerm < reply.Term {
+			rf.currentTerm = reply.Term
+			rf.state = "Follower"
+			rf.votedFor = -1
+		}
+		// if we receive major votes, --> leader
+		if reply.VoteGranted {
+			rf.voteRecieved += 1
+			if rf.state == "Candidate" && rf.voteRecieved*2 > len(rf.peers) {
+				rf.state = "Leader"
+				// send channel response
+				rf.winner <- true
+			}
+		}
+	}
 	return ok
 }
 
@@ -298,92 +339,153 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (2A, 2B, 2C).
+	// all servers start in the follower state
+	rf.state = "Follower"
+	// term is 0 at startup
+	rf.currentTerm = 0
+	rf.votedFor = 0
+	rf.voteRecieved = 0
+
+	rf.heartBeat = make(chan bool)
+	rf.winner = make(chan bool)
+	rf.electionTimout = make(chan bool)
+
+	// routine which checks the election timeout (implementing this as an anonymous routine now)
 	go func() {
-		min := 500 // These values are to be decided by us to adapt with the tester
-		max := 700
-		for {
-			for rf.state == "leader" { // Replace with channels?
-				continue
-			}
-
-			if rf.state == "follower" {
-				// electionTimeout := time.Duration((rand.Intn(max-min) + min) * time.Millisecond)
-				// electionTimeout := (rand.Intn(max-min) + min) * time.Millisecond
-				electionTimeout := time.Duration(rand.Intn(max-min)+min) * time.Millisecond
-				if time.Now().Sub(rf.lastHeard) < electionTimeout {
-					time.Sleep(electionTimeout - (time.Now().Sub(rf.lastHeard)))
-				}
-			}
-
-			// if time.Now().Sub(rf.lastHeard) > electionTimeout {
-			electionTimedOut := make(chan bool)
-			// Start election timeout again
-			electionTimeout := time.Duration(rand.Intn(max-min)+min) * time.Millisecond
-			go func() {
-				time.Sleep(electionTimeout)
-				electionTimedOut <- true
-			}()
-			// The server transitions to candidate state
-			rf.state = "candidate"
-			// Increments term
-			rf.currentTerm += 1
-			// Votes for itself
-			rf.votedFor = me
-			// The server requests for votes
-			args := &RequestVoteArgs{rf.currentTerm, me}
-			votes := 0
-			for i := 0; i < len(rf.peers); i++ {
-				if i == me {
-					continue
-				}
-				go func(i int) { // Send votes in parallel
-					reply := &RequestVoteReply{}
-					peers[i].Call("Raft.RequestVote", args, reply) // Do we have to repeat the call if it is false?
-					if reply.VoteGranted == true {
-						votes++ // Does this have to be locked?
-						if votes > len(rf.peers)/2 {
-							rf.state = "leader"
-							for j := 0; j < len(rf.peers); j++ {
-								if j == me {
-									continue
-								}
-								heartbeatArgs := &AppendEntriesArgs{rf.currentTerm, me}
-								go func(j int) {
-									heartbeatReply := &AppendEntriesReply{}
-									peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
-								}(j)
-							}
-						}
-					}
-				}(i)
-			}
-			if <-electionTimedOut {
-				continue
-			}
-		}
-		// }
+		time.Sleep(time.Millisecond * time.Duration(rand.Intn(200)+500))
+		rf.electionTimout <- true
 	}()
-	// }
+	// start the raft algorithm
+	go rf.Run()
 
-	go func() {
-		time.Sleep(150 * time.Millisecond)
-		if rf.state == "leader" {
-			for j := 0; j < len(rf.peers); j++ {
-				if j == me {
-					continue
-				}
-				heartbeatArgs := &AppendEntriesArgs{rf.currentTerm, me}
-				go func(j int) {
-					heartbeatReply := &AppendEntriesReply{}
-					peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
-				}(j)
-			}
-		}
-	}()
+	// go func() {
+	// 	time.Sleep(150 * time.Millisecond)
+	// 	if rf.state == "Leader" {
+	// 		for j := 0; j < len(rf.peers); j++ {
+	// 			if j == me {
+	// 				continue
+	// 			}
+	// 			heartbeatArgs := &AppendEntriesArgs{rf.currentTerm, me}
+	// 			go func(j int) {
+	// 				heartbeatReply := &AppendEntriesReply{}
+	// 				peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
+	// 			}(j)
+	// 		}
+	// 	}
+	// }()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	return rf
 
+}
+
+func (rf *Raft) SendAppendEntries() {
+	// TODO: Tomorrow
+}
+
+// sendVOteRequests is supposed to send vote requests to all the servers in the cluster
+func (rf *Raft) sendVoteRequests() {
+	var args RequestVoteArgs
+	var reply RequestVoteReply
+	rf.mu.Lock()
+	args.CandidateId = rf.me
+	args.Term = rf.currentTerm
+	me := rf.me
+	rf.mu.Unlock()
+	for i, r := range rf.peers {
+		// don't send to self!
+		if rf.peers[me] == r {
+			continue
+		}
+		// send RPC in parallel (Why tf does this give me data race?)
+		go rf.sendRequestVote(i, &args, &reply)
+	}
+}
+
+func (rf *Raft) Run() {
+	for {
+		rf.mu.Lock()
+		currentState := rf.state
+		rf.mu.Unlock()
+
+		if currentState == "Leader" {
+			/* if leader, send append entries every 120 seconds? */
+			go rf.SendAppendEntries() // this should just send an heartbeat
+			time.Sleep(time.Millisecond * 120)
+		}
+
+		if currentState == "Follower" {
+			select {
+			// do nothing if receive heartbeat, all is fine
+			case <-rf.heartBeat:
+			case <-rf.electionTimout:
+				rf.mu.Lock()
+				rf.state = "Candidate"
+				rf.mu.Unlock()
+			}
+			// electionTimeout := time.Duration(rand.Intn(max-min)+min) * time.Millisecond
+			// if time.Now().Sub(rf.lastHeard) < electionTimeout {
+			// 	time.Sleep(electionTimeout - (time.Now().Sub(rf.lastHeard)))
+			// }
+		}
+
+		if currentState == "Candidate" {
+			// a candidate would vote for self and then send requestVoteRPC to other servers (figure 2-Rule for servers-Candidates)
+			rf.mu.Lock()
+			rf.votedFor = rf.me
+			rf.voteRecieved = 1
+			rf.currentTerm++
+			rf.mu.Unlock()
+			// i think that this routine should send notification (channel) state the result of the election.
+			go rf.sendVoteRequests()
+			/*
+				a candidate can recive:
+				1. heartbeat -> convert to follower (another server is elected as leader)
+				2. winner -> convert to Leader (we received the majority of votes)
+			*/
+			select {
+			// if we recieve heartbeat. change to follower
+			case <-rf.heartBeat:
+				rf.mu.Lock()
+				rf.state = "Follower"
+				rf.mu.Unlock()
+			// if we win the election
+			case <-rf.winner:
+				rf.mu.Lock()
+				rf.state = "Leader"
+				rf.mu.Unlock()
+			}
+		}
+
+		// The server requests for votes
+		// args := &RequestVoteArgs{rf.currentTerm, rf.me}
+		// votes := 0
+		// for i := 0; i < len(rf.peers); i++ {
+		// 	if i == rf.me {
+		// 		continue
+		// 	}
+		// 	// delegating to other func
+		// 	go func(i int) { // Send votes in parallel
+		// 		reply := &RequestVoteReply{}
+		// 		rf.peers[i].Call("Raft.RequestVote", args, reply) // Do we have to repeat the call if it is false?
+		// 		if reply.VoteGranted == true {
+		// 			votes++ // Does this have to be locked?
+		// 			if votes > len(rf.peers)/2 {
+		// 				rf.state = "leader"
+		// 				for j := 0; j < len(rf.peers); j++ {
+		// 					if j == rf.me {
+		// 						continue
+		// 					}
+		// 					heartbeatArgs := &AppendEntriesArgs{rf.currentTerm, rf.me}
+		// 					go func(j int) {
+		// 						heartbeatReply := &AppendEntriesReply{}
+		// 						rf.peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
+		// 					}(j)
+		// 				}
+		// 			}
+		// 		}
+		// 	}(i)
+		// }
+	}
 }
