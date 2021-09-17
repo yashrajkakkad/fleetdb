@@ -344,6 +344,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						votes++ // Does this have to be locked?
 						if votes > len(rf.peers)/2 {
 							rf.state = "leader"
+							for j := 0; j < len(rf.peers); j++ {
+								if j == me {
+									continue
+								}
+								heartbeatArgs := &AppendEntriesArgs{rf.currentTerm, me}
+								go func(j int) {
+									heartbeatReply := &AppendEntriesReply{}
+									peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
+								}(j)
+							}
 						}
 					}
 				}(i)
