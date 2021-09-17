@@ -18,7 +18,7 @@ package raft
 //
 
 import (
-	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,7 +74,7 @@ type Raft struct {
 	matchIndex []int
 
 	// Other variables
-	lastHeard        time.Time
+	lastHeard time.Time
 	// state is the current state of the server
 	// at a single time, a server can  be:
 	// Follower
@@ -157,6 +157,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	// Should this be done only if a server is a follower?
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 	} else if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // -1 is null for now
@@ -164,6 +165,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		reply.VoteGranted = false
 	}
+
+	if args.Term > rf.currentTerm { // Convert to follower
+		rf.currentTerm = args.Term
+		rf.state = "follower"
+	}
+
 	reply.Term = rf.currentTerm
 }
 
@@ -178,10 +185,18 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if rf.state == "leader" { // A leader ignores AppendEntries RPCs
+		return
+	}
+	rf.lastHeard = time.Now()
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 	} else {
 		reply.Success = true
+		if args.Term > rf.currentTerm { // Convert to follower
+			rf.currentTerm = args.Term
+			rf.state = "follower"
+		}
 	}
 	reply.Term = rf.currentTerm
 }
@@ -285,16 +300,64 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	go func() {
+		min := 500 // These values are to be decided by us to adapt with the tester
+		max := 700
 		for {
-			electionTimeout := time.Duration(100 * time.Millisecond()) // should be randomly generated
-			if time.Now().Sub(rf.lastHeard) > electionTimeout {
-				// kick off election
+			for rf.state == "leader" { // Replace with channels?
+				continue
+			}
+
+			if rf.state == "follower" {
+				// electionTimeout := time.Duration((rand.Intn(max-min) + min) * time.Millisecond)
+				// electionTimeout := (rand.Intn(max-min) + min) * time.Millisecond
+				electionTimeout := time.Duration(rand.Intn(max-min)+min) * time.Millisecond
+				if time.Now().Sub(rf.lastHeard) < electionTimeout {
+					time.Sleep(electionTimeout - (time.Now().Sub(rf.lastHeard)))
+				}
+			}
+
+			// if time.Now().Sub(rf.lastHeard) > electionTimeout {
+			electionTimedOut := make(chan bool)
+			// Start election timeout again
+			electionTimeout := time.Duration(rand.Intn(max-min)+min) * time.Millisecond
+			go func() {
+				time.Sleep(electionTimeout)
+				electionTimedOut <- true
+			}()
+			// The server transitions to candidate state
+			rf.state = "candidate"
+			// Increments term
+			rf.currentTerm += 1
+			// Votes for itself
+			rf.votedFor = me
+			// The server requests for votes
+			args := &RequestVoteArgs{rf.currentTerm, me}
+			votes := 0
+			for i := 0; i < len(rf.peers); i++ {
+				if i == me {
+					continue
+				}
+				go func(i int) { // Send votes in parallel
+					reply := &RequestVoteReply{}
+					peers[i].Call("Raft.RequestVote", args, reply) // Do we have to repeat the call if it is false?
+					if reply.VoteGranted == true {
+						votes++ // Does this have to be locked?
+						if votes > len(rf.peers)/2 {
+							rf.state = "leader"
+						}
+					}
+				}(i)
+			}
+			if <-electionTimedOut {
+				continue
 			}
 		}
-	}
-
+		// }
+	}()
+	// }
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	return rf
+
 }
