@@ -365,6 +365,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		// }
 	}()
 	// }
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		if rf.state == "leader" {
+			for j := 0; j < len(rf.peers); j++ {
+				if j == me {
+					continue
+				}
+				heartbeatArgs := &AppendEntriesArgs{rf.currentTerm, me}
+				go func(j int) {
+					heartbeatReply := &AppendEntriesReply{}
+					peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
+				}(j)
+			}
+		}
+	}()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
