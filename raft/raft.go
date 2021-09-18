@@ -387,7 +387,6 @@ func (rf *Raft) SendAppendEntries() {
 // sendVOteRequests is supposed to send vote requests to all the servers in the cluster
 func (rf *Raft) sendVoteRequests() {
 	var args RequestVoteArgs
-	var reply RequestVoteReply
 	rf.mu.Lock()
 	args.CandidateId = rf.me
 	args.Term = rf.currentTerm
@@ -399,6 +398,7 @@ func (rf *Raft) sendVoteRequests() {
 			continue
 		}
 		// send RPC in parallel (Why tf does this give me data race?)
+		var reply RequestVoteReply
 		go rf.sendRequestVote(i, &args, &reply)
 	}
 }
