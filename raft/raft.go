@@ -181,7 +181,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // -1 is null for now
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId // give vote
-		rf.state = "Follower"          // change state to follower (what if a candidate receives request vote rpc?)
+		DPrintf("%d became a follower by giving vote to %d", rf.me, rf.votedFor)
+		rf.state = "Follower" // change state to follower (what if a candidate receives request vote rpc?)
 	} else {
 		reply.VoteGranted = false
 	}
@@ -207,10 +208,21 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if rf.state == "Leader" { // A leader ignores AppendEntries RPCs
+	DPrintf("%d received heartbeat from %d", rf.me, args.LeaderId)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.lastHeard = time.Now()
+	if rf.state == "Leader" {
+		if args.Term > rf.currentTerm { // Convert to follower
+			DPrintf("%d is a follower as it discovered a new leader %d with a newer term", rf.me, args.LeaderId)
+			rf.state = "Follower"
+			rf.currentTerm = args.Term
+		}
 		return
 	}
-	rf.lastHeard = time.Now()
+	if rf.state == "Candidate" {
+		rf.heartBeat <- true
+	}
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 	} else {
@@ -343,7 +355,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = "Follower"
 	// term is 0 at startup
 	rf.currentTerm = 0
-	rf.votedFor = 0
+	rf.votedFor = -1
 	rf.voteRecieved = 0
 
 	rf.heartBeat = make(chan bool)
@@ -353,7 +365,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// routine which checks the election timeout (implementing this as an anonymous routine now)
 	go func() {
 		time.Sleep(time.Millisecond * time.Duration(rand.Intn(200)+500))
+		rf.mu.Lock()
 		rf.electionTimout <- true
+		rf.mu.Unlock()
 	}()
 	// start the raft algorithm
 	go rf.Run()
@@ -382,6 +396,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 func (rf *Raft) SendAppendEntries() {
 	// TODO: Tomorrow
+	for j := 0; j < len(rf.peers); j++ {
+		if j == rf.me {
+			continue
+		}
+		heartbeatArgs := &AppendEntriesArgs{rf.currentTerm, rf.me}
+		go func(j int) {
+			heartbeatReply := &AppendEntriesReply{}
+			rf.peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
+		}(j)
+	}
 }
 
 // sendVOteRequests is supposed to send vote requests to all the servers in the cluster
@@ -411,16 +435,19 @@ func (rf *Raft) Run() {
 
 		if currentState == "Leader" {
 			/* if leader, send append entries every 120 seconds? */
+			DPrintf("%d sending heartbeats to continue claiming leadership for term %d", rf.me, rf.currentTerm)
 			go rf.SendAppendEntries() // this should just send an heartbeat
 			time.Sleep(time.Millisecond * 120)
 		}
 
 		if currentState == "Follower" {
+			DPrintf("%d is a follower", rf.me)
 			select {
 			// do nothing if receive heartbeat, all is fine
 			case <-rf.heartBeat:
 			case <-rf.electionTimout:
 				rf.mu.Lock()
+				DPrintf("%d became candidate for election", rf.me)
 				rf.state = "Candidate"
 				rf.mu.Unlock()
 			}
@@ -448,12 +475,18 @@ func (rf *Raft) Run() {
 			// if we recieve heartbeat. change to follower
 			case <-rf.heartBeat:
 				rf.mu.Lock()
+				DPrintf("%d became follower from candidate as it received a heartbeat", rf.me)
 				rf.state = "Follower"
 				rf.mu.Unlock()
 			// if we win the election
 			case <-rf.winner:
 				rf.mu.Lock()
+				DPrintf("%d won the election and became a leader", rf.me)
 				rf.state = "Leader"
+				rf.mu.Unlock()
+			case <-rf.electionTimout:
+				rf.mu.Lock()
+				DPrintf("%d Election timed out", rf.me)
 				rf.mu.Unlock()
 			}
 		}
