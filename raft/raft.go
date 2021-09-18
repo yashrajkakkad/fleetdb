@@ -207,6 +207,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
 	if rf.state == "Leader" { // A leader ignores AppendEntries RPCs
 		return
 	}
@@ -221,6 +222,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	reply.Term = rf.currentTerm
+	rf.mu.Unlock()
 }
 
 //
@@ -273,6 +275,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			}
 		}
 	}
+	return ok
+}
+
+func (rf *Raft) AppendEntriesRPC(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -380,8 +387,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 }
 
+// Leader calls the sendAppendEntries function to send heartbeats to all the peers
 func (rf *Raft) SendAppendEntries() {
-	// TODO: Tomorrow
+	var args AppendEntriesArgs
+	rf.mu.Lock()
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
+	me := rf.me
+	rf.mu.Unlock()
+
+	for i, r := range rf.peers {
+		// don't send to self!
+		if rf.peers[me] == r {
+			continue
+		}
+		// send RPC in parallel (Why tf does this give me data race?)
+		var reply AppendEntriesReply
+		go rf.AppendEntriesRPC(i, &args, &reply)
+	}
 }
 
 // sendVOteRequests is supposed to send vote requests to all the servers in the cluster
