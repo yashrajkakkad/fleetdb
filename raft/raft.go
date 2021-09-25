@@ -486,7 +486,8 @@ func (rf *Raft) SendAppendEntriestoAll() {
 			continue
 		}
 		// rf.mu.Unlock()
-		go rf.SendAppendEntriesRPC(i, &args, &reply)
+		replyVar := reply
+		go rf.SendAppendEntriesRPC(i, &args, &replyVar)
 	}
 }
 
