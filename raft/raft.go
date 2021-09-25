@@ -91,8 +91,8 @@ type Raft struct {
 	heartBeat chan bool
 	// send to candidate if we win election i.e received more than half of the votes
 	winner chan bool
-	// election timeout: if this is true, there exists no leader, turn the follower->candidate
-	electionTimeout chan bool
+	// voted: reset the timer, if we've voted
+	// voteGiven chan bool
 }
 
 type Log struct {
@@ -224,36 +224,68 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	DPrintf("%d received heartbeat from %d", rf.me, args.LeaderId)
+	reply.Term = args.Term
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.state == "Leader" {
-		if args.Term > rf.currentTerm { // Convert to follower
-			DPrintf("%d is a follower as it discovered a new leader %d with a newer term", rf.me, args.LeaderId)
-			rf.state = "Follower"
-			rf.currentTerm = args.Term
-			rf.lastHeard = time.Now()
-		} else {
-			DPrintf("%d (term: %d) received a heartbeat from %d (term: %d", rf.me, rf.currentTerm, args.LeaderId, args.Term)
-		}
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		return
 	}
-	if rf.state == "Candidate" && args.Term >= rf.currentTerm {
-		rf.lastHeard = time.Now()
-		rf.heartBeat <- true
+
+	rf.heartBeat <- true
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = "Follower"
+		rf.votedFor = -1
 	}
-	if args.Term < rf.currentTerm {
-		reply.Success = false
-	} else {
-		reply.Success = true
-		rf.lastHeard = time.Now()
-		if args.Term > rf.currentTerm { // Convert to follower
-			rf.currentTerm = args.Term
+	// DPrintf("%d received heartbeat from %d", rf.me, args.LeaderId)
+	// rf.mu.Lock()
+	// defer rf.mu.Unlock()
+	// if rf.state == "Leader" {
+	// 	if args.Term > rf.currentTerm { // Convert to follower
+	// 		DPrintf("%d is a follower as it discovered a new leader %d with a newer term", rf.me, args.LeaderId)
+	// 		rf.state = "Follower"
+	// 		rf.currentTerm = args.Term
+	// 		rf.lastHeard = time.Now()
+	// 	} else {
+	// 		DPrintf("%d (term: %d) received a heartbeat from %d (term: %d", rf.me, rf.currentTerm, args.LeaderId, args.Term)
+	// 	}
+	// 	return
+	// }
+	// if rf.state == "Candidate" && args.Term >= rf.currentTerm {
+	// 	rf.lastHeard = time.Now()
+	// 	rf.heartBeat <- true
+	// }
+	// if args.Term < rf.currentTerm {
+	// 	reply.Success = false
+	// } else {
+	// 	reply.Success = true
+	// 	rf.lastHeard = time.Now()
+	// 	if args.Term > rf.currentTerm { // Convert to follower
+	// 		rf.currentTerm = args.Term
+	// 		rf.state = "Follower"
+	// 		rf.votedFor = -1
+	// 	}
+	// }
+	// reply.Term = rf.currentTerm
+}
+
+func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	rf.mu.Lock()
+	peer := rf.peers[server]
+	rf.mu.Unlock()
+	ok := peer.Call("Raft.AppendEntries", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if ok {
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
 			rf.state = "Follower"
 			rf.votedFor = -1
+			return ok
 		}
 	}
-	reply.Term = rf.currentTerm
+	return ok
 }
 
 //
@@ -379,43 +411,42 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.voteRecieved = 0
 
-	rf.heartBeat = make(chan bool)
-	rf.winner = make(chan bool)
-	rf.electionTimeout = make(chan bool)
+	rf.heartBeat = make(chan bool, 10)
+	rf.winner = make(chan bool, 10)
 
 	// routine which checks the election timeout (implementing this as an anonymous routine now)
 	// go func() {
-	// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(200)+500))
+	// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(200)+300))
 	// 	rf.mu.Lock()
 	// 	rf.electionTimeout <- true
 	// 	rf.mu.Unlock()
 	// }()
-	go func() {
-		// max:= 500
-		// min:= 300
-		for {
-			if rf.state == "Leader" {
-				continue
-			}
-			electionTimeout := time.Duration(rand.Intn(200)+500) * time.Millisecond
-			DPrintf("%d election timeout", electionTimeout)
-			rf.mu.Lock()
-			lastHeard := rf.lastHeard
-			rf.mu.Unlock()
-			for time.Since(lastHeard) < electionTimeout {
-				time.Sleep(3 * time.Millisecond)
-				rf.mu.Lock()
-				lastHeard = rf.lastHeard
-				rf.mu.Unlock()
-			}
-			rf.mu.Lock()
-			DPrintf("%d sending timeout", rf.me)
-			rf.electionTimeout <- true
-			rf.lastHeard = time.Now()
-			rf.mu.Unlock()
+	// go func() {
+	// 	// max:= 500
+	// 	// min:= 300
+	// 	for {
+	// 		if rf.state == "Leader" {
+	// 			continue
+	// 		}
+	// 		electionTimeout := time.Duration(rand.Intn(200)+500) * time.Millisecond
+	// 		DPrintf("%d election timeout", electionTimeout)
+	// 		rf.mu.Lock()
+	// 		lastHeard := rf.lastHeard
+	// 		rf.mu.Unlock()
+	// 		for time.Since(lastHeard) < electionTimeout {
+	// 			time.Sleep(3 * time.Millisecond)
+	// 			rf.mu.Lock()
+	// 			lastHeard = rf.lastHeard
+	// 			rf.mu.Unlock()
+	// 		}
+	// 		rf.mu.Lock()
+	// 		DPrintf("%d sending timeout", rf.me)
+	// 		rf.electionTimeout <- true
+	// 		rf.lastHeard = time.Now()
+	// 		rf.mu.Unlock()
 
-		}
-	}()
+	// 	}
+	// }()
 	// start the raft algorithm
 	go rf.Run()
 
@@ -441,28 +472,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 }
 
-func (rf *Raft) SendAppendEntries() {
-	// TODO: Tomorrow
+func (rf *Raft) SendAppendEntriestoAll() {
+	var args AppendEntriesArgs
+	var reply AppendEntriesReply
 	rf.mu.Lock()
 	peers := rf.peers
 	me := rf.me
-	currentTerm := rf.currentTerm
+	args.Term = rf.currentTerm
 	rf.mu.Unlock()
-	for j := 0; j < len(peers); j++ {
+	for i, r := range rf.peers {
 		// rf.mu.Lock()
-		if j == me {
+		if peers[me] == r {
 			continue
 		}
 		// rf.mu.Unlock()
-		heartbeatArgs := &AppendEntriesArgs{currentTerm, me}
-		go func(j int) {
-			heartbeatReply := &AppendEntriesReply{}
-			peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
-		}(j)
+		go rf.SendAppendEntriesRPC(i, &args, &reply)
 	}
 }
 
-// sendVOteRequests is supposed to send vote requests to all the servers in the cluster
+// sendVoteRequests is supposed to send vote requests to all the servers in the cluster
 func (rf *Raft) sendVoteRequests() {
 	var args RequestVoteArgs
 	rf.mu.Lock()
@@ -492,8 +520,8 @@ func (rf *Raft) Run() {
 			rf.mu.Lock()
 			DPrintf("%d sending heartbeats to continue claiming leadership for term %d", rf.me, rf.currentTerm)
 			rf.mu.Unlock()
-			go rf.SendAppendEntries() // this should just send an heartbeat
-			time.Sleep(time.Millisecond * 200)
+			go rf.SendAppendEntriestoAll() // this should just send an heartbeat
+			time.Sleep(time.Millisecond * 100)
 		}
 
 		if currentState == "Follower" {
@@ -501,7 +529,7 @@ func (rf *Raft) Run() {
 			select {
 			// do nothing if receive heartbeat, all is fine
 			case <-rf.heartBeat:
-			case <-rf.electionTimeout:
+			case <-time.After(time.Millisecond * time.Duration(rand.Intn(200)+500)):
 				rf.mu.Lock()
 				DPrintf("%d became candidate for election for term %d", rf.me, rf.currentTerm+1)
 				rf.state = "Candidate"
@@ -541,41 +569,11 @@ func (rf *Raft) Run() {
 				DPrintf("%d won the election and became a leader", rf.me)
 				rf.state = "Leader"
 				rf.mu.Unlock()
-			case <-rf.electionTimeout:
+			case <-time.After(time.Millisecond * time.Duration(rand.Intn(200)+500)):
 				rf.mu.Lock()
 				DPrintf("%d Election timed out", rf.me)
 				rf.mu.Unlock()
 			}
 		}
-
-		// The server requests for votes
-		// args := &RequestVoteArgs{rf.currentTerm, rf.me}
-		// votes := 0
-		// for i := 0; i < len(rf.peers); i++ {
-		// 	if i == rf.me {
-		// 		continue
-		// 	}
-		// 	// delegating to other func
-		// 	go func(i int) { // Send votes in parallel
-		// 		reply := &RequestVoteReply{}
-		// 		rf.peers[i].Call("Raft.RequestVote", args, reply) // Do we have to repeat the call if it is false?
-		// 		if reply.VoteGranted == true {
-		// 			votes++ // Does this have to be locked?
-		// 			if votes > len(rf.peers)/2 {
-		// 				rf.state = "leader"
-		// 				for j := 0; j < len(rf.peers); j++ {
-		// 					if j == rf.me {
-		// 						continue
-		// 					}
-		// 					heartbeatArgs := &AppendEntriesArgs{rf.currentTerm, rf.me}
-		// 					go func(j int) {
-		// 						heartbeatReply := &AppendEntriesReply{}
-		// 						rf.peers[j].Call("Raft.AppendEntries", heartbeatArgs, heartbeatReply)
-		// 					}(j)
-		// 				}
-		// 			}
-		// 		}
-		// 	}(i)
-		// }
 	}
 }
