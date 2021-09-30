@@ -18,7 +18,7 @@ package raft
 //
 
 import (
-	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,13 +74,23 @@ type Raft struct {
 	matchIndex []int
 
 	// Other variables
-	lastHeard        time.Time
-	// state is the current state of the server
-	// at a single time, a server can  be:
-	// Follower
-	// Candidate
-	// Leader
+	lastHeard time.Time
+	/*
+		   state is the current state of the server
+		   at a single time, a server can  be:
+			Follower
+		    Candidate
+		   	Leader
+	*/
 	state string
+	// total voteRecieved by the candidate, if more than half --> leader
+	voteRecieved int
+
+	// channels for communication
+	// sent by the leader to rest of the servers
+	heartBeat chan bool
+	// send to candidate if we win election i.e received more than half of the votes
+	winner chan bool
 }
 
 type Log struct {
@@ -90,7 +100,8 @@ type Log struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	// do we need locks here?
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.state == "Leader"
 }
 
@@ -157,13 +168,22 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
-	} else if rf.votedFor == -1 || rf.votedFor == args.CandidateId { // -1 is null for now
+		reply.Term = rf.currentTerm
+	} else if args.Term > rf.currentTerm {
 		reply.VoteGranted = true
-	} else {
-		reply.VoteGranted = false
+		rf.currentTerm = reply.Term
+		rf.votedFor = args.CandidateId
+		rf.lastHeard = time.Now()
+	} else if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+		rf.lastHeard = time.Now()
 	}
+
 	reply.Term = rf.currentTerm
 }
 
@@ -178,12 +198,38 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	reply.Term = args.Term
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
-		reply.Success = false
-	} else {
-		reply.Success = true
+		reply.Term = rf.currentTerm
+		return
 	}
-	reply.Term = rf.currentTerm
+
+	rf.heartBeat <- true
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = "Follower"
+		rf.votedFor = -1
+	}
+}
+
+func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	rf.mu.Lock()
+	peer := rf.peers[server]
+	rf.mu.Unlock()
+	ok := peer.Call("Raft.AppendEntries", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if ok {
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.state = "Follower"
+			rf.votedFor = -1
+			return ok
+		}
+	}
+	return ok
 }
 
 //
@@ -217,6 +263,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if ok {
+		// if the currentTerm is less than other server's term, update term and become follower
+		if rf.currentTerm < reply.Term {
+			rf.currentTerm = reply.Term
+			rf.state = "Follower"
+			rf.votedFor = -1
+		}
+		// if we receive major votes, --> leader
+		if reply.VoteGranted {
+			rf.voteRecieved += 1
+			if rf.state == "Candidate" && rf.voteRecieved*2 > len(rf.peers) {
+				// rf.state = "Leader"
+				// send channel response
+				rf.winner <- true
+			}
+		}
+	}
 	return ok
 }
 
@@ -283,18 +348,123 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (2A, 2B, 2C).
-	go func() {
-		for {
-			electionTimeout := time.Duration(100 * time.Millisecond()) // should be randomly generated
-			if time.Now().Sub(rf.lastHeard) > electionTimeout {
-				// kick off election
-			}
-		}
-	}
+	// all servers start in the follower state
+	rf.state = "Follower"
+	// term is 0 at startup
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.voteRecieved = 0
+
+	rf.heartBeat = make(chan bool, 10)
+	rf.winner = make(chan bool, 10)
+
+	// start the raft algorithm
+	go rf.Run()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	return rf
+
+}
+
+func (rf *Raft) SendAppendEntriestoAll() {
+	var args AppendEntriesArgs
+	var reply AppendEntriesReply
+	rf.mu.Lock()
+	peers := rf.peers
+	me := rf.me
+	args.Term = rf.currentTerm
+	rf.mu.Unlock()
+	for i, r := range rf.peers {
+		if peers[me] == r {
+			continue
+		}
+		replyVar := reply
+		go rf.SendAppendEntriesRPC(i, &args, &replyVar)
+	}
+}
+
+// sendVoteRequests is supposed to send vote requests to all the servers in the cluster
+func (rf *Raft) sendVoteRequests() {
+	var args RequestVoteArgs
+	rf.mu.Lock()
+	args.CandidateId = rf.me
+	args.Term = rf.currentTerm
+	me := rf.me
+	rf.mu.Unlock()
+	for i, r := range rf.peers {
+		// don't send to self!
+		if rf.peers[me] == r {
+			continue
+		}
+		// send RPC in parallel (Why tf does this give me data race?)
+		var reply RequestVoteReply
+		go rf.sendRequestVote(i, &args, &reply)
+	}
+}
+
+func (rf *Raft) Run() {
+	for {
+		rf.mu.Lock()
+		currentState := rf.state
+		rf.mu.Unlock()
+
+		if currentState == "Leader" {
+			/* if leader, send append entries every 120 seconds? */
+			rf.mu.Lock()
+			DPrintf("%d sending heartbeats to continue claiming leadership for term %d", rf.me, rf.currentTerm)
+			rf.mu.Unlock()
+			go rf.SendAppendEntriestoAll() // this should just send an heartbeat
+			time.Sleep(time.Millisecond * 100)
+		}
+
+		if currentState == "Follower" {
+			DPrintf("%d is a follower", rf.me)
+			select {
+			// do nothing if receive heartbeat, all is fine
+			case <-rf.heartBeat:
+			case <-time.After(time.Millisecond * time.Duration(rand.Intn(200)+500)):
+				rf.mu.Lock()
+				DPrintf("%d became candidate for election for term %d", rf.me, rf.currentTerm+1)
+				rf.state = "Candidate"
+				rf.mu.Unlock()
+			}
+		}
+
+		if currentState == "Candidate" {
+			// a candidate would vote for self and then send requestVoteRPC to other servers (figure 2-Rule for servers-Candidates)
+			DPrintf("%d in candidate state", rf.me)
+			rf.mu.Lock()
+			rf.votedFor = rf.me
+			rf.voteRecieved = 1
+			rf.currentTerm++
+			rf.mu.Unlock()
+			// i think that this routine should send notification (channel) state the result of the election.
+			go rf.sendVoteRequests()
+			/*
+				a candidate can recive:
+				1. heartbeat -> convert to follower (another server is elected as leader)
+				2. winner -> convert to Leader (we received the majority of votes)
+			*/
+			select {
+			// if we recieve heartbeat. change to follower
+			case <-rf.heartBeat:
+				rf.mu.Lock()
+				DPrintf("%d became follower from candidate as it received a heartbeat", rf.me)
+				rf.state = "Follower"
+				rf.mu.Unlock()
+			// if we win the election
+			case <-rf.winner:
+				rf.mu.Lock()
+				DPrintf("%d won the election and became a leader", rf.me)
+				rf.state = "Leader"
+				rf.mu.Unlock()
+			case <-time.After(time.Millisecond * time.Duration(rand.Intn(200)+500)):
+				rf.mu.Lock()
+				DPrintf("%d Election timed out", rf.me)
+				rf.mu.Unlock()
+			}
+		}
+	}
 }
