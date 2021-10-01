@@ -95,6 +95,8 @@ type Raft struct {
 
 type Log struct {
 	// Blank for now, until we implement log replication
+	command interface{}
+	term    int
 }
 
 // return currentTerm and whether this server
@@ -149,8 +151,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term        int
-	CandidateId int
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -170,26 +174,48 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	validTerm := false
 	if args.Term < rf.currentTerm {
-		reply.VoteGranted = false
+		// reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	} else if args.Term > rf.currentTerm {
-		reply.VoteGranted = true
+		// reply.VoteGranted = true
+		validTerm = true
 		rf.currentTerm = reply.Term
-		rf.votedFor = args.CandidateId
+		// rf.votedFor = args.CandidateId
 		rf.lastHeard = time.Now()
 	} else if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		reply.VoteGranted = true
-		rf.votedFor = args.CandidateId
+		// reply.VoteGranted = true
+		validTerm = true
+		// rf.votedFor = args.CandidateId
 		rf.lastHeard = time.Now()
 	}
 
+	// From the paper: Raft determines which of two logs is more up-to-date
+	// by comparing the index and term of the last entries in the
+	// logs. If the logs have last entries with different terms, then
+	// the log with the later term is more up-to-date. If the logs
+	// end with the same term, then whichever log is longer is
+	// more up-to-date.
+	upToDateLog := false
+	lastLogIndex := len(rf.log) - 1 // Will there be an edge case where len(rf.log) == 0
+	if rf.log[lastLogIndex].term != args.LastLogTerm {
+		upToDateLog = (args.LastLogTerm >= rf.log[lastLogIndex].term)
+	} else {
+		upToDateLog = (args.LastLogIndex >= lastLogIndex)
+	}
+	reply.VoteGranted = validTerm && upToDateLog
+	rf.votedFor = args.CandidateId
 	reply.Term = rf.currentTerm
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	entries      []*Log
+	leaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -300,11 +326,35 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	index := len(rf.log)
+	term := rf.currentTerm
+	isLeader := (rf.state == "Leader")
 
 	// Your code here (2B).
+	if isLeader {
+		log := &Log{command, term} // New log created
+		// Append to rf.log
+		rf.log = append(rf.log, log)
+		// return
+
+		// This will move to goroutine
+		// prevLogIndex := len(rf.log) - 1
+		// AppendEntriesArgs := AppendEntriesArgs{
+		// 	Term:         term,
+		// 	LeaderId:     rf.me,
+		// 	PrevLogIndex: prevLogIndex,
+		// 	PrevLogTerm:  rf.log[prevLogIndex].term,
+		// 	entries:      []*Log{log},
+		// 	leaderCommit: rf.commitIndex,
+		// }
+		// replies := make([]AppendEntriesReply, len(rf.peers))
+		// for i, r := range rf.peers {
+		// 	if i == rf.me {
+		// 		continue
+		// 	}
+		// 	// TODO
+		// }
+	}
 
 	return index, term, isLeader
 }
