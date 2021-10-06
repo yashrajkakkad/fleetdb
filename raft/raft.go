@@ -94,7 +94,6 @@ type Raft struct {
 }
 
 type Log struct {
-	// Blank for now, until we implement log replication
 	command interface{}
 	term    int
 }
@@ -214,13 +213,15 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	entries      []*Log
-	leaderCommit int
+	Entries      []*Log
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term             int
+	Success          bool
+	ConflictingTerm  int /* Refer page 7 bottom right*/
+	ConflictingIndex int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -229,15 +230,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
+		reply.Success = false
 		return
 	}
 
+	// send heartbeat
 	rf.heartBeat <- true
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = "Follower"
 		rf.votedFor = -1
 	}
+
+	reply.ConflictingIndex = -1
+	reply.ConflictingTerm = -1
+
+	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+	// but first we have to check if follower log length is less than leader logIndex (to further index out of bound)
+	if args.PrevLogIndex > len(rf.log)-1 {
+		reply.Success = false
+		reply.ConflictingIndex = len(rf.log)
+		return
+	}
+
+	matchTerm := rf.log[args.PrevLogIndex].term
+	// log doesn't contain an entry at prevLogIndex. Inconsistency. Back off
+	if matchTerm != args.PrevLogTerm {
+		reply.ConflictingTerm = matchTerm
+		for i := args.PrevLogIndex; i >= 0 && rf.log[i].term == matchTerm; i-- {
+			reply.ConflictingIndex = i
+		}
+		return
+	}
+
+	// TODO: check if the existing entry conflicts with new incoming appendEntries RPC (delete and replace)
 }
 
 func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -326,35 +352,23 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := len(rf.log)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index := len(rf.log) - 1
 	term := rf.currentTerm
 	isLeader := (rf.state == "Leader")
 
 	// Your code here (2B).
-	if isLeader {
-		log := &Log{command, term} // New log created
-		// Append to rf.log
-		rf.log = append(rf.log, log)
-		// return
-
-		// This will move to goroutine
-		// prevLogIndex := len(rf.log) - 1
-		// AppendEntriesArgs := AppendEntriesArgs{
-		// 	Term:         term,
-		// 	LeaderId:     rf.me,
-		// 	PrevLogIndex: prevLogIndex,
-		// 	PrevLogTerm:  rf.log[prevLogIndex].term,
-		// 	entries:      []*Log{log},
-		// 	leaderCommit: rf.commitIndex,
-		// }
-		// replies := make([]AppendEntriesReply, len(rf.peers))
-		// for i, r := range rf.peers {
-		// 	if i == rf.me {
-		// 		continue
-		// 	}
-		// 	// TODO
-		// }
+	if !isLeader {
+		return index, term, isLeader
 	}
+
+	// append to the leader log
+	log := &Log{
+		term:    term,
+		command: command,
+	}
+	rf.log = append(rf.log, log)
 
 	return index, term, isLeader
 }
@@ -465,7 +479,7 @@ func (rf *Raft) Run() {
 			rf.mu.Lock()
 			DPrintf("%d sending heartbeats to continue claiming leadership for term %d", rf.me, rf.currentTerm)
 			rf.mu.Unlock()
-			go rf.SendAppendEntriestoAll() // this should just send an heartbeat
+			go rf.SendAppendEntriestoAll() // this should just send an heartbeat or should it?
 			time.Sleep(time.Millisecond * 100)
 		}
 
@@ -509,6 +523,8 @@ func (rf *Raft) Run() {
 				rf.mu.Lock()
 				DPrintf("%d won the election and became a leader", rf.me)
 				rf.state = "Leader"
+				// send appendEntries/heartbeats?
+				rf.SendAppendEntriestoAll()
 				rf.mu.Unlock()
 			case <-time.After(time.Millisecond * time.Duration(rand.Intn(200)+500)):
 				rf.mu.Lock()
