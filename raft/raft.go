@@ -73,8 +73,6 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	// Other variables
-	lastHeard time.Time
 	/*
 		   state is the current state of the server
 		   at a single time, a server can  be:
@@ -94,8 +92,8 @@ type Raft struct {
 }
 
 type Log struct {
-	command interface{}
-	term    int
+	Command interface{}
+	Term    int
 }
 
 // return currentTerm and whether this server
@@ -166,6 +164,23 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+// From the paper: Raft determines which of two logs is more up-to-date
+// by comparing the index and term of the last entries in the
+// logs. If the logs have last entries with different terms, then
+// the log with the later term is more up-to-date. If the logs
+// end with the same term, then whichever log is longer is
+// more up-to-date.
+func (rf *Raft) isLogUptodate(lastIndex int, lastTerm int) bool {
+	currLastIndex := len(rf.log) - 1
+	DPrintf("currLastIndex: %d\n", currLastIndex)
+	currLastTerm := rf.log[currLastIndex].Term
+
+	if currLastTerm == lastTerm {
+		return lastIndex >= currLastIndex
+	}
+	return lastTerm > currLastTerm
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -173,39 +188,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	validTerm := false
 	if args.Term < rf.currentTerm {
-		// reply.VoteGranted = false
+		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
+		return
 	} else if args.Term > rf.currentTerm {
-		// reply.VoteGranted = true
-		validTerm = true
-		rf.currentTerm = reply.Term
-		// rf.votedFor = args.CandidateId
-		rf.lastHeard = time.Now()
-	} else if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		// reply.VoteGranted = true
-		validTerm = true
-		// rf.votedFor = args.CandidateId
-		rf.lastHeard = time.Now()
+		rf.currentTerm = args.Term
+		rf.state = "Follower"
+		rf.votedFor = -1
 	}
 
-	// From the paper: Raft determines which of two logs is more up-to-date
-	// by comparing the index and term of the last entries in the
-	// logs. If the logs have last entries with different terms, then
-	// the log with the later term is more up-to-date. If the logs
-	// end with the same term, then whichever log is longer is
-	// more up-to-date.
-	upToDateLog := false
-	lastLogIndex := len(rf.log) - 1 // Will there be an edge case where len(rf.log) == 0
-	if rf.log[lastLogIndex].term != args.LastLogTerm {
-		upToDateLog = (args.LastLogTerm >= rf.log[lastLogIndex].term)
-	} else {
-		upToDateLog = (args.LastLogIndex >= lastLogIndex)
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isLogUptodate(args.LastLogIndex, args.LastLogTerm) {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
 	}
-	reply.VoteGranted = validTerm && upToDateLog
-	rf.votedFor = args.CandidateId
-	reply.Term = rf.currentTerm
 }
 
 type AppendEntriesArgs struct {
@@ -253,11 +249,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	matchTerm := rf.log[args.PrevLogIndex].term
+	matchTerm := rf.log[args.PrevLogIndex].Term
 	// log doesn't contain an entry at prevLogIndex. Inconsistency. Back off
 	if matchTerm != args.PrevLogTerm {
 		reply.ConflictingTerm = matchTerm
-		for i := args.PrevLogIndex; i >= 0 && rf.log[i].term == matchTerm; i-- {
+		for i := args.PrevLogIndex; i >= 0 && rf.log[i].Term == matchTerm; i-- {
 			reply.ConflictingIndex = i
 		}
 		return
@@ -323,12 +319,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.currentTerm = reply.Term
 			rf.state = "Follower"
 			rf.votedFor = -1
+			return ok
 		}
 		// if we receive major votes, --> leader
 		if reply.VoteGranted {
 			rf.voteRecieved += 1
 			if rf.state == "Candidate" && rf.voteRecieved*2 > len(rf.peers) {
-				// rf.state = "Leader"
+				rf.state = "Leader"
 				// send channel response
 				rf.winner <- true
 			}
@@ -365,8 +362,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// append to the leader log
 	log := &Log{
-		term:    term,
-		command: command,
+		Term:    term,
+		Command: command,
 	}
 	rf.log = append(rf.log, log)
 
@@ -421,6 +418,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.heartBeat = make(chan bool, 10)
 	rf.winner = make(chan bool, 10)
+	rf.log = append(rf.log, &Log{Term: 0})
 
 	// start the raft algorithm
 	go rf.Run()
@@ -455,6 +453,8 @@ func (rf *Raft) sendVoteRequests() {
 	rf.mu.Lock()
 	args.CandidateId = rf.me
 	args.Term = rf.currentTerm
+	args.LastLogIndex = len(rf.log) - 1
+	args.LastLogTerm = rf.log[len(rf.log)-1].Term
 	me := rf.me
 	rf.mu.Unlock()
 	for i, r := range rf.peers {
@@ -462,7 +462,6 @@ func (rf *Raft) sendVoteRequests() {
 		if rf.peers[me] == r {
 			continue
 		}
-		// send RPC in parallel (Why tf does this give me data race?)
 		var reply RequestVoteReply
 		go rf.sendRequestVote(i, &args, &reply)
 	}
@@ -475,22 +474,16 @@ func (rf *Raft) Run() {
 		rf.mu.Unlock()
 
 		if currentState == "Leader" {
-			/* if leader, send append entries every 120 seconds? */
-			rf.mu.Lock()
-			DPrintf("%d sending heartbeats to continue claiming leadership for term %d", rf.me, rf.currentTerm)
-			rf.mu.Unlock()
 			go rf.SendAppendEntriestoAll() // this should just send an heartbeat or should it?
 			time.Sleep(time.Millisecond * 100)
 		}
 
 		if currentState == "Follower" {
-			DPrintf("%d is a follower", rf.me)
+			//DPrintf("%d is a follower", rf.me)
 			select {
-			// do nothing if receive heartbeat, all is fine
 			case <-rf.heartBeat:
-			case <-time.After(time.Millisecond * time.Duration(rand.Intn(200)+500)):
+			case <-time.After(time.Millisecond * time.Duration(rand.Intn(300)+200)):
 				rf.mu.Lock()
-				DPrintf("%d became candidate for election for term %d", rf.me, rf.currentTerm+1)
 				rf.state = "Candidate"
 				rf.mu.Unlock()
 			}
@@ -498,13 +491,11 @@ func (rf *Raft) Run() {
 
 		if currentState == "Candidate" {
 			// a candidate would vote for self and then send requestVoteRPC to other servers (figure 2-Rule for servers-Candidates)
-			DPrintf("%d in candidate state", rf.me)
 			rf.mu.Lock()
 			rf.votedFor = rf.me
 			rf.voteRecieved = 1
 			rf.currentTerm++
 			rf.mu.Unlock()
-			// i think that this routine should send notification (channel) state the result of the election.
 			go rf.sendVoteRequests()
 			/*
 				a candidate can recive:
@@ -515,21 +506,12 @@ func (rf *Raft) Run() {
 			// if we recieve heartbeat. change to follower
 			case <-rf.heartBeat:
 				rf.mu.Lock()
-				DPrintf("%d became follower from candidate as it received a heartbeat", rf.me)
+				//DPrintf("%d became follower from candidate as it received a heartbeat", rf.me)
 				rf.state = "Follower"
 				rf.mu.Unlock()
 			// if we win the election
 			case <-rf.winner:
-				rf.mu.Lock()
-				DPrintf("%d won the election and became a leader", rf.me)
-				rf.state = "Leader"
-				// send appendEntries/heartbeats?
-				rf.SendAppendEntriestoAll()
-				rf.mu.Unlock()
 			case <-time.After(time.Millisecond * time.Duration(rand.Intn(200)+500)):
-				rf.mu.Lock()
-				DPrintf("%d Election timed out", rf.me)
-				rf.mu.Unlock()
 			}
 		}
 	}
