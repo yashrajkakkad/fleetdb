@@ -380,10 +380,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) SendAppendEntries(i int) {
 	DPrintf("Inside SendAppendEntries")
 	for {
+		rf.mu.Lock()
 		if rf.state != "Leader" {
 			DPrintf("Returning")
+			rf.mu.Unlock()
 			return
 		}
+		rf.mu.Unlock()
 		// DPrintf("Sending AppendEntries for log replication")
 		// DPrintf("Lock acquired by SendAppendEntries")
 		rf.mu.Lock()
