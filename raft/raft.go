@@ -171,9 +171,11 @@ type RequestVoteReply struct {
 // end with the same term, then whichever log is longer is
 // more up-to-date.
 func (rf *Raft) isLogUptodate(lastIndex int, lastTerm int) bool {
+	// rf.mu.Lock()
 	currLastIndex := len(rf.log) - 1
 	DPrintf("currLastIndex: %d\n", currLastIndex)
 	currLastTerm := rf.log[currLastIndex].Term
+	// rf.mu.Unlock()
 
 	if currLastTerm == lastTerm {
 		return lastIndex >= currLastIndex
@@ -326,6 +328,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.voteRecieved += 1
 			if rf.state == "Candidate" && rf.voteRecieved*2 > len(rf.peers) {
 				rf.state = "Leader"
+				DPrintf("%d became leader", rf.me)
+				rf.becameLeader()
 				// send channel response
 				rf.winner <- true
 			}
@@ -349,14 +353,17 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	// DPrintf("Start triggered")
+	// DPrintf("Lock acquired by Start")
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index := len(rf.log) - 1
+	index := len(rf.log)
 	term := rf.currentTerm
 	isLeader := (rf.state == "Leader")
 
 	// Your code here (2B).
 	if !isLeader {
+		DPrintf("Exiting from Start")
 		return index, term, isLeader
 	}
 
@@ -366,8 +373,62 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, log)
-
+	DPrintf("Exiting from Start as leader")
 	return index, term, isLeader
+}
+
+func (rf *Raft) SendAppendEntries(i int) {
+	DPrintf("Inside SendAppendEntries")
+	for {
+		if rf.state != "Leader" {
+			DPrintf("Returning")
+			return
+		}
+		// DPrintf("Sending AppendEntries for log replication")
+		// DPrintf("Lock acquired by SendAppendEntries")
+		rf.mu.Lock()
+		lastLogIndex := len(rf.log) - 1
+		sendRPC := false
+		if lastLogIndex >= rf.nextIndex[i] {
+			sendRPC = true
+		}
+		rf.mu.Unlock()
+		if sendRPC {
+			var args AppendEntriesArgs
+			var reply AppendEntriesReply
+			// DPrintf("Lock acquired by SendAppendEntries to send RPC")
+			rf.mu.Lock()
+			args.Term = rf.currentTerm
+			args.LeaderId = rf.me
+			args.PrevLogIndex = rf.nextIndex[i] - 1
+			if args.PrevLogIndex >= 0 {
+				args.Term = rf.log[args.PrevLogIndex].Term
+			} else {
+				args.Term = 0
+			}
+			args.Entries = rf.log[rf.nextIndex[i]:]
+			args.LeaderCommit = rf.commitIndex
+			rf.mu.Unlock()
+			ok := rf.SendAppendEntriesRPC(i, &args, &reply)
+			DPrintf("Response received from AppendEntries: %v", ok)
+			if ok {
+				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =true")
+				rf.mu.Lock()
+				rf.nextIndex[i] = lastLogIndex + 1
+				rf.matchIndex[i] = lastLogIndex + 1
+				rf.mu.Unlock()
+			} else {
+				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =false")
+				rf.mu.Lock()
+				rf.nextIndex[i]--
+				rf.mu.Unlock()
+			}
+		} else {
+			time.Sleep(10 * time.Millisecond)
+
+		}
+
+	}
 }
 
 //
@@ -420,6 +481,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.winner = make(chan bool, 10)
 	rf.log = append(rf.log, &Log{Term: 0})
 
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+
 	// start the raft algorithm
 	go rf.Run()
 
@@ -433,6 +497,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) SendAppendEntriestoAll() {
 	var args AppendEntriesArgs
 	var reply AppendEntriesReply
+	// DPrintf("Lock acquired by SendAppendEntriestoAll")
 	rf.mu.Lock()
 	peers := rf.peers
 	me := rf.me
@@ -447,9 +512,31 @@ func (rf *Raft) SendAppendEntriestoAll() {
 	}
 }
 
+func (rf *Raft) becameLeader() {
+	// Initialize next index and match index
+	// DPrintf("Lock acquired by becameLeader()")
+	// rf.mu.Lock()
+	DPrintf("For loop to update nextIndex and matchIndex")
+	for i := 0; i < len(rf.nextIndex); i++ {
+		rf.nextIndex[i] = len(rf.log)
+		rf.matchIndex[i] = 0
+	}
+	me := rf.me
+	// rf.mu.Unlock()
+	// Trigger goroutines for sending AppendEntries
+	for i := 0; i < len(rf.peers); i++ {
+		if i == me {
+			continue
+		}
+		go rf.SendAppendEntries(i)
+	}
+	go rf.updateCommitIndex()
+}
+
 // sendVoteRequests is supposed to send vote requests to all the servers in the cluster
 func (rf *Raft) sendVoteRequests() {
 	var args RequestVoteArgs
+	// DPrintf("Lock acquired by sendVoteRequests()")
 	rf.mu.Lock()
 	args.CandidateId = rf.me
 	args.Term = rf.currentTerm
@@ -467,11 +554,68 @@ func (rf *Raft) sendVoteRequests() {
 	}
 }
 
+func (rf *Raft) updateLastApplied() {
+	rf.mu.Lock()
+	commitIndex := rf.commitIndex
+	lastApplied := rf.lastApplied
+	rf.mu.Unlock()
+	if commitIndex > lastApplied {
+		rf.mu.Lock()
+		rf.lastApplied++
+		rf.mu.Unlock()
+		// Apply log to state machine?
+	} else {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	if rf.state != "Leader" {
+		return
+	}
+
+	cond := true
+
+	for cond {
+		if rf.state != "Leader" {
+			return
+		}
+		rf.mu.Lock()
+		n := rf.commitIndex + 1
+		DPrintf("Checking if %d can update commitIndex to %d", rf.me, n)
+		if n >= len(rf.log) {
+			rf.mu.Unlock()
+			break
+		}
+		rf.mu.Unlock()
+		cnt := 0
+		for _, r := range rf.matchIndex {
+			if r >= n {
+				cnt++
+			}
+		}
+		rf.mu.Lock()
+		cond = cond && (cnt > (len(rf.peers) / 2))
+		cond = cond && (rf.log[n].Term == rf.currentTerm)
+		rf.mu.Unlock()
+		if cond {
+			rf.mu.Lock()
+			rf.commitIndex++
+			DPrintf("%d updated commitIndex to %d", rf.me, rf.commitIndex)
+			rf.mu.Unlock()
+		}
+	}
+	time.Sleep(10 * time.Millisecond)
+}
+
 func (rf *Raft) Run() {
 	for {
+		// DPrintf("Lock acquired by Run()")
 		rf.mu.Lock()
 		currentState := rf.state
 		rf.mu.Unlock()
+
+		go rf.updateLastApplied()
 
 		if currentState == "Leader" {
 			go rf.SendAppendEntriestoAll() // this should just send an heartbeat or should it?
@@ -483,6 +627,7 @@ func (rf *Raft) Run() {
 			select {
 			case <-rf.heartBeat:
 			case <-time.After(time.Millisecond * time.Duration(rand.Intn(300)+200)):
+				// DPrintf("Lock acquired by Run to change state to candidate")
 				rf.mu.Lock()
 				rf.state = "Candidate"
 				rf.mu.Unlock()
@@ -491,6 +636,7 @@ func (rf *Raft) Run() {
 
 		if currentState == "Candidate" {
 			// a candidate would vote for self and then send requestVoteRPC to other servers (figure 2-Rule for servers-Candidates)
+			// DPrintf("Lock acquired by Run() as Candidate")
 			rf.mu.Lock()
 			rf.votedFor = rf.me
 			rf.voteRecieved = 1
