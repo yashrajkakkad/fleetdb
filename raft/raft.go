@@ -84,6 +84,8 @@ type Raft struct {
 	// total voteRecieved by the candidate, if more than half --> leader
 	voteRecieved int
 
+	applyCh chan ApplyMsg
+
 	// channels for communication
 	// sent by the leader to rest of the servers
 	heartBeat chan bool
@@ -218,17 +220,16 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term             int
 	Success          bool
-	ConflictingTerm  int /* Refer page 7 bottom right*/
 	ConflictingIndex int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	reply.Term = args.Term
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		reply.ConflictingIndex = len(rf.log)
 		return
 	}
 
@@ -241,7 +242,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	reply.ConflictingIndex = -1
-	reply.ConflictingTerm = -1
+	reply.Term = rf.currentTerm
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	// but first we have to check if follower log length is less than leader logIndex (to further index out of bound)
@@ -253,15 +254,55 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	matchTerm := rf.log[args.PrevLogIndex].Term
 	// log doesn't contain an entry at prevLogIndex. Inconsistency. Back off
-	if matchTerm != args.PrevLogTerm {
-		reply.ConflictingTerm = matchTerm
+	if args.PrevLogIndex > 0 && matchTerm != args.PrevLogTerm {
 		for i := args.PrevLogIndex; i >= 0 && rf.log[i].Term == matchTerm; i-- {
 			reply.ConflictingIndex = i
 		}
 		return
-	}
+	} else {
+		rf.log = rf.log[:args.PrevLogIndex+1]
+		currLog := rf.log[args.PrevLogIndex+1:]
 
-	// TODO: check if the existing entry conflicts with new incoming appendEntries RPC (delete and replace)
+		if rf.isLogConflicted(args.Entries, currLog) || len(currLog) < len(args.Entries) {
+			rf.log = append(rf.log, args.Entries...)
+		} else {
+			rf.log = append(rf.log, currLog...)
+		}
+		reply.Success = true
+		reply.ConflictingIndex = args.PrevLogIndex
+
+		if args.LeaderCommit > rf.commitIndex {
+			if args.LeaderCommit < len(rf.log)-1 {
+				rf.commitIndex = args.LeaderCommit
+			} else {
+				rf.commitIndex = len(rf.log) - 1
+			}
+			go rf.applyLog()
+		}
+	}
+}
+
+func (rf *Raft) isLogConflicted(leaderLog []*Log, peerLog []*Log) bool {
+	for i := 0; i < len(leaderLog) && i < len(peerLog); i++ {
+		if leaderLog[i].Term != peerLog[i].Term {
+			return true
+		}
+	}
+	return false
+}
+
+func (rf *Raft) applyLog() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		msg := ApplyMsg{}
+		msg.CommandIndex = i
+		msg.CommandValid = true
+		msg.Command = rf.log[i].Command
+		rf.applyCh <- msg
+	}
+	rf.lastApplied = rf.commitIndex
 }
 
 func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -280,6 +321,63 @@ func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply 
 		}
 	}
 	return ok
+}
+
+func (rf *Raft) SendAppendEntries(i int) {
+	DPrintf("Inside SendAppendEntries")
+	for {
+		rf.mu.Lock()
+		if rf.state != "Leader" {
+			DPrintf("Returning")
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+		// DPrintf("Sending AppendEntries for log replication")
+		// DPrintf("Lock acquired by SendAppendEntries")
+		rf.mu.Lock()
+		lastLogIndex := len(rf.log) - 1
+		sendRPC := false
+		if lastLogIndex >= rf.nextIndex[i] {
+			sendRPC = true
+		}
+		rf.mu.Unlock()
+		if sendRPC {
+			var args AppendEntriesArgs
+			var reply AppendEntriesReply
+			// DPrintf("Lock acquired by SendAppendEntries to send RPC")
+			rf.mu.Lock()
+			args.Term = rf.currentTerm
+			args.LeaderId = rf.me
+			args.PrevLogIndex = rf.nextIndex[i] - 1
+			if args.PrevLogIndex >= 0 {
+				args.Term = rf.log[args.PrevLogIndex].Term
+			} else {
+				args.Term = 0
+			}
+			args.Entries = rf.log[rf.nextIndex[i]:]
+			args.LeaderCommit = rf.commitIndex
+			rf.mu.Unlock()
+			ok := rf.SendAppendEntriesRPC(i, &args, &reply)
+			DPrintf("Response received from AppendEntries: %v", ok)
+			if ok {
+				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =true")
+				rf.mu.Lock()
+				rf.nextIndex[i] = lastLogIndex + 1
+				rf.matchIndex[i] = lastLogIndex + 1
+				rf.mu.Unlock()
+			} else {
+				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =false")
+				rf.mu.Lock()
+				rf.nextIndex[i]--
+				rf.mu.Unlock()
+			}
+		} else {
+			time.Sleep(10 * time.Millisecond)
+
+		}
+
+	}
 }
 
 //
@@ -377,63 +475,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-func (rf *Raft) SendAppendEntries(i int) {
-	DPrintf("Inside SendAppendEntries")
-	for {
-		rf.mu.Lock()
-		if rf.state != "Leader" {
-			DPrintf("Returning")
-			rf.mu.Unlock()
-			return
-		}
-		rf.mu.Unlock()
-		// DPrintf("Sending AppendEntries for log replication")
-		// DPrintf("Lock acquired by SendAppendEntries")
-		rf.mu.Lock()
-		lastLogIndex := len(rf.log) - 1
-		sendRPC := false
-		if lastLogIndex >= rf.nextIndex[i] {
-			sendRPC = true
-		}
-		rf.mu.Unlock()
-		if sendRPC {
-			var args AppendEntriesArgs
-			var reply AppendEntriesReply
-			// DPrintf("Lock acquired by SendAppendEntries to send RPC")
-			rf.mu.Lock()
-			args.Term = rf.currentTerm
-			args.LeaderId = rf.me
-			args.PrevLogIndex = rf.nextIndex[i] - 1
-			if args.PrevLogIndex >= 0 {
-				args.Term = rf.log[args.PrevLogIndex].Term
-			} else {
-				args.Term = 0
-			}
-			args.Entries = rf.log[rf.nextIndex[i]:]
-			args.LeaderCommit = rf.commitIndex
-			rf.mu.Unlock()
-			ok := rf.SendAppendEntriesRPC(i, &args, &reply)
-			DPrintf("Response received from AppendEntries: %v", ok)
-			if ok {
-				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =true")
-				rf.mu.Lock()
-				rf.nextIndex[i] = lastLogIndex + 1
-				rf.matchIndex[i] = lastLogIndex + 1
-				rf.mu.Unlock()
-			} else {
-				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =false")
-				rf.mu.Lock()
-				rf.nextIndex[i]--
-				rf.mu.Unlock()
-			}
-		} else {
-			time.Sleep(10 * time.Millisecond)
-
-		}
-
-	}
-}
-
 //
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
@@ -480,6 +521,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.voteRecieved = 0
 
+	rf.applyCh = applyCh
 	rf.heartBeat = make(chan bool, 10)
 	rf.winner = make(chan bool, 10)
 	rf.log = append(rf.log, &Log{Term: 0})
@@ -544,6 +586,7 @@ func (rf *Raft) sendVoteRequests() {
 	args.CandidateId = rf.me
 	args.Term = rf.currentTerm
 	args.LastLogIndex = len(rf.log) - 1
+	DPrintf("length of the log: %d", len(rf.log))
 	args.LastLogTerm = rf.log[len(rf.log)-1].Term
 	me := rf.me
 	rf.mu.Unlock()
