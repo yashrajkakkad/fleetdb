@@ -63,7 +63,7 @@ type Raft struct {
 	// Persistent state on all servers
 	currentTerm int
 	votedFor    int
-	log         []*Log
+	log         []Log
 
 	// Volatile state on all servers
 	commitIndex int
@@ -263,27 +263,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("Server %d : Conflict at term %d", rf.me, matchTerm)
 		return
 	} else {
-		currLog := rf.log[args.PrevLogIndex+1:]
 		rf.log = rf.log[:args.PrevLogIndex+1]
-		// DPrintf("%d : Currlog length is %d, Log length is %d, arg log length is %d", rf.me, len(currLog), len(rf.log), len(args.Entries))
-		// DPrintf("Args entries : %v", args.Entries)
-		logEntries := make([]*Log, len(args.Entries))
-		for _, v := range args.Entries {
-			logEntries = append(logEntries, &v)
-		}
-		if rf.isLogConflicted(logEntries, currLog) || len(currLog) < len(args.Entries) {
-			DPrintf("Server %d : Log conflict found", rf.me)
-			rf.log = append(rf.log, logEntries...)
-		} else {
-			rf.log = append(rf.log, currLog...)
-			if len(args.Entries) > len(rf.log) {
-				// newEntries := args.Entries[len(rf.log):]
-				newEntries := logEntries[len(rf.log):]
-				rf.log = append(rf.log, newEntries...)
-			}
-		}
+		rf.log = append(rf.log, args.Entries...)
 		reply.Success = true
-		reply.ConflictingIndex = args.PrevLogIndex
+		reply.ConflictingIndex = args.PrevLogIndex + len(args.Entries)
 
 		DPrintf("Server %d : Log length after AppendEntries is %d", rf.me, len(rf.log))
 		if args.LeaderCommit > rf.commitIndex {
@@ -296,15 +279,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		// DPrintf("%d : Synced log length %d", rf.me, len(rf.log))
 	}
-}
-
-func (rf *Raft) isLogConflicted(leaderLog []*Log, peerLog []*Log) bool {
-	for i := 0; i < len(leaderLog) && i < len(peerLog); i++ {
-		if leaderLog[i].Term != (*peerLog[i]).Term {
-			return true
-		}
-	}
-	return false
 }
 
 func (rf *Raft) applyLog() {
@@ -375,7 +349,7 @@ func (rf *Raft) SendAppendEntries(i int) {
 			logEntries := rf.log[rf.nextIndex[i]:]
 			args.Entries = make([]Log, len(logEntries))
 			for _, r := range logEntries {
-				args.Entries = append(args.Entries, *r)
+				args.Entries = append(args.Entries, r)
 			}
 			// DPrintf("Args entries length for server %d: %d ", i, len(args.Entries))
 			// DPrintf("Args entries : %v", args.Entries)
@@ -490,7 +464,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	// append to the leader log
-	log := &Log{
+	log := Log{
 		Term:    term,
 		Command: command,
 	}
@@ -549,7 +523,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.heartBeat = make(chan bool, 10)
 	rf.winner = make(chan bool, 10)
-	rf.log = append(rf.log, &Log{Term: 0})
+	rf.log = append(rf.log, Log{Term: 0})
 
 	rf.commitIndex = -1
 	rf.lastApplied = -1
