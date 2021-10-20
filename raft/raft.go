@@ -280,24 +280,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictingIndex = args.PrevLogIndex + len(args.Entries)
 
 		DPrintf("Server %d : Log length after AppendEntries is %d", rf.me, len(rf.log))
-		if args.LeaderCommit > rf.commitIndex {
-			if args.LeaderCommit < len(rf.log)-1 {
-				rf.commitIndex = args.LeaderCommit
-			} else {
-				rf.commitIndex = len(rf.log) - 1
-			}
-			DPrintf("Server %d: commitIndex: %d", rf.me, rf.commitIndex)
-			go rf.applyLog()
-		}
 		// DPrintf("%d : Synced log length %d", rf.me, len(rf.log))
 	}
+
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit < len(rf.log)-1 {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = len(rf.log) - 1
+		}
+		DPrintf("Server %d: commitIndex: %d", rf.me, rf.commitIndex)
+		go rf.applyLog()
+	}
+
 }
 
 func (rf *Raft) applyLog() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+	for i := rf.lastApplied; i <= rf.commitIndex; i++ {
 		msg := ApplyMsg{}
 		msg.CommandIndex = i
 		msg.CommandValid = true
@@ -674,6 +676,8 @@ func (rf *Raft) updateCommitIndex() {
 				rf.commitIndex++
 				DPrintf("Server %d : Updated commitIndex to %d", rf.me, rf.commitIndex)
 				rf.mu.Unlock()
+				go rf.applyLog()
+
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
