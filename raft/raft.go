@@ -667,16 +667,20 @@ func (rf *Raft) updateCommitIndex() {
 				break
 			}
 			matchIndex := rf.matchIndex
+			me := rf.me
 			rf.mu.Unlock()
 			cnt := 0
 
-			for _, r := range matchIndex {
+			for i, r := range matchIndex {
+				if i == me {
+					continue
+				}
 				if r >= n {
 					cnt++
 				}
 			}
 			rf.mu.Lock()
-			cond = cond && (cnt > (len(rf.peers) / 2))
+			cond = cond && (cnt >= (len(rf.peers) / 2))
 			cond = cond && (rf.log[n].Term == rf.currentTerm)
 			rf.mu.Unlock()
 			if cond {
