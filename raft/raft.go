@@ -384,7 +384,9 @@ func (rf *Raft) SendAppendEntries(i int) {
 			} else {
 				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =false")
 				rf.mu.Lock()
-				rf.nextIndex[i]--
+				if rf.nextIndex[i] > 1 {
+					rf.nextIndex[i]--
+				}
 				rf.mu.Unlock()
 			}
 		} else {
@@ -641,28 +643,34 @@ func (rf *Raft) updateLastApplied() {
 
 func (rf *Raft) updateCommitIndex() {
 	for {
+		rf.mu.Lock()
 		if rf.state != "Leader" {
 			DPrintf("updateCommitIndex is exiting")
+			rf.mu.Unlock()
 			return
 		}
 
+		rf.mu.Unlock()
 		cond := true
 
 		for cond {
+			rf.mu.Lock()
 			if rf.state != "Leader" {
 				DPrintf("updateCommitIndex is exiting")
+				rf.mu.Unlock()
 				return
 			}
-			rf.mu.Lock()
 			n := rf.commitIndex + 1
 			// DPrintf("Checking if %d can update commitIndex to %d", rf.me, n)
 			if n >= len(rf.log) {
 				rf.mu.Unlock()
 				break
 			}
+			matchIndex := rf.matchIndex
 			rf.mu.Unlock()
 			cnt := 0
-			for _, r := range rf.matchIndex {
+
+			for _, r := range matchIndex {
 				if r >= n {
 					cnt++
 				}
