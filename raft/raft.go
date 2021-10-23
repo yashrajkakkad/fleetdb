@@ -375,6 +375,13 @@ func (rf *Raft) SendAppendEntries(i int) {
 			DPrintf("Server %d (Leader) sending append entries to server %d", rf.me, i)
 			DPrintf("Server %d to %d: NextIndex is %d, sending log entries: %v", rf.me, i, rf.nextIndex[i], args.Entries)
 			rf.SendAppendEntriesRPC(i, &args, &reply)
+			rf.mu.Lock()
+			if rf.state != "Leader" {
+				DPrintf("Server %d's state is not leader, it is %s because of term mismatch", rf.me, rf.state)
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
 			DPrintf("Response received from AppendEntries of %d: %v", i, reply.Success)
 			if reply.Success {
 				rf.mu.Lock()
