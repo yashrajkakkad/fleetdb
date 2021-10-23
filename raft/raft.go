@@ -386,7 +386,7 @@ func (rf *Raft) SendAppendEntries(i int) {
 			if reply.Success {
 				rf.mu.Lock()
 				rf.nextIndex[i] = lastLogIndex + 1
-				rf.matchIndex[i] = lastLogIndex + 1
+				rf.matchIndex[i] = lastLogIndex
 				rf.mu.Unlock()
 			} else {
 				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =false")
@@ -597,7 +597,7 @@ func (rf *Raft) becameLeader() {
 	// DPrintf("For loop to update nextIndex and matchIndex")
 	for i := 0; i < len(rf.nextIndex); i++ {
 		rf.nextIndex[i] = len(rf.log)
-		rf.matchIndex[i] = -1
+		// rf.matchIndex[i] = -1
 	}
 	me := rf.me
 	// rf.mu.Unlock()
@@ -680,6 +680,7 @@ func (rf *Raft) updateCommitIndex() {
 
 			for i, r := range matchIndex {
 				if i == me {
+					cnt++
 					continue
 				}
 				if r >= n {
@@ -687,7 +688,7 @@ func (rf *Raft) updateCommitIndex() {
 				}
 			}
 			rf.mu.Lock()
-			cond = cond && (cnt >= (len(rf.peers) / 2))
+			cond = cond && (cnt > (len(rf.peers) / 2))
 			cond = cond && (rf.log[n].Term == rf.currentTerm)
 			rf.mu.Unlock()
 			if cond {
@@ -696,7 +697,7 @@ func (rf *Raft) updateCommitIndex() {
 				// DPrintf("Server %d : Updated commitIndex to %d", rf.me, rf.commitIndex)
 				rf.mu.Unlock()
 				go rf.applyLog()
-
+				break
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
