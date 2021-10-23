@@ -255,7 +255,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > len(rf.log)-1 {
 		reply.Success = false
 		reply.ConflictingIndex = len(rf.log)
-		DPrintf("Server %d: AppendEntries rejected due to log not containing matching entry", rf.me)
+		DPrintf("Server %d: AppendEntries rejected due to log not containing matching entry. prevLogIndex: %d, len(log): %d", rf.me, args.PrevLogIndex, len(rf.log))
 		return
 	}
 
@@ -279,7 +279,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		reply.ConflictingIndex = args.PrevLogIndex + len(args.Entries)
 
-		DPrintf("Server %d : Log length after AppendEntries is %d", rf.me, len(rf.log))
+		// DPrintf("Server %d : Log length after AppendEntries is %d", rf.me, len(rf.log))
 		// DPrintf("%d : Synced log length %d", rf.me, len(rf.log))
 	}
 
@@ -289,7 +289,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.commitIndex = len(rf.log) - 1
 		}
-		DPrintf("Server %d: commitIndex: %d", rf.me, rf.commitIndex)
+		// DPrintf("Server %d: commitIndex: %d", rf.me, rf.commitIndex)
 		go rf.applyLog()
 	}
 
@@ -366,7 +366,7 @@ func (rf *Raft) SendAppendEntries(i int) {
 			// for _, r := range logEntries {
 			// 	args.Entries = append(args.Entries, r)
 			// }
-			DPrintf("Server %d: Sending AppendEntries for term %d, nextIndex: %d", rf.me, args.Term, rf.nextIndex[i])
+			DPrintf("Server %d (Leader): Sending AppendEntries for term %d, nextIndex: %d", rf.me, args.Term, rf.nextIndex[i])
 			// DPrintf("Args entries length for server %d: %d ", i, len(args.Entries))
 			// DPrintf("Args entries : %v", args.Entries)
 
@@ -374,9 +374,9 @@ func (rf *Raft) SendAppendEntries(i int) {
 			rf.mu.Unlock()
 			DPrintf("Server %d (Leader) sending append entries to server %d", rf.me, i)
 			DPrintf("Server %d to %d: NextIndex is %d, sending log entries: %v", rf.me, i, rf.nextIndex[i], args.Entries)
-			ok := rf.SendAppendEntriesRPC(i, &args, &reply)
-			DPrintf("Response received from AppendEntries: %v", ok)
-			if ok {
+			rf.SendAppendEntriesRPC(i, &args, &reply)
+			DPrintf("Response received from AppendEntries of %d: %v", i, reply.Success)
+			if reply.Success {
 				rf.mu.Lock()
 				rf.nextIndex[i] = lastLogIndex + 1
 				rf.matchIndex[i] = lastLogIndex + 1
@@ -571,7 +571,7 @@ func (rf *Raft) SendAppendEntriestoAll() {
 	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 
 	rf.mu.Unlock()
-	DPrintf("Server %d (Leader): Log length %d", rf.me, len(rf.log))
+	// DPrintf("Server %d (Leader): Log length %d", rf.me, len(rf.log))
 	for i, r := range rf.peers {
 		if peers[me] == r {
 			continue
@@ -645,7 +645,7 @@ func (rf *Raft) updateCommitIndex() {
 	for {
 		rf.mu.Lock()
 		if rf.state != "Leader" {
-			DPrintf("updateCommitIndex is exiting")
+			// DPrintf("updateCommitIndex is exiting")
 			rf.mu.Unlock()
 			return
 		}
@@ -656,7 +656,7 @@ func (rf *Raft) updateCommitIndex() {
 		for cond {
 			rf.mu.Lock()
 			if rf.state != "Leader" {
-				DPrintf("updateCommitIndex is exiting")
+				// DPrintf("updateCommitIndex is exiting")
 				rf.mu.Unlock()
 				return
 			}
@@ -686,7 +686,7 @@ func (rf *Raft) updateCommitIndex() {
 			if cond {
 				rf.mu.Lock()
 				rf.commitIndex++
-				DPrintf("Server %d : Updated commitIndex to %d", rf.me, rf.commitIndex)
+				// DPrintf("Server %d : Updated commitIndex to %d", rf.me, rf.commitIndex)
 				rf.mu.Unlock()
 				go rf.applyLog()
 
@@ -712,7 +712,7 @@ func (rf *Raft) Run() {
 		}
 
 		if currentState == "Follower" {
-			//DPrintf("%d is a follower", rf.me)
+			// DPrintf("%d is a follower", rf.me)
 			select {
 			case <-rf.heartBeat:
 			case <-time.After(time.Millisecond * time.Duration(rand.Intn(300)+200)):
