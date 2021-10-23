@@ -228,9 +228,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	// DPrintf("%d : Currlog length is %d, Log length is %d, arg log length is %d", rf.me, len(currLog), len(rf.log), len(args.Entries))
 	// DPrintf("Arg Entries length at receiver: %d", len(args.Entries))
-	if len(args.Entries) > 0 {
-		DPrintf("Server %d: AppendEntries (not a heartbeat)", rf.me)
-	}
+	// if len(args.Entries) > 0 {
+	// 	DPrintf("Server %d: AppendEntries (not a heartbeat)", rf.me)
+	// }
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -575,7 +575,6 @@ func (rf *Raft) SendAppendEntriestoAll() {
 	args.Term = rf.currentTerm
 	args.LeaderCommit = rf.commitIndex
 	args.LeaderId = rf.me
-	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 
 	rf.mu.Unlock()
 	// DPrintf("Server %d (Leader): Log length %d", rf.me, len(rf.log))
@@ -585,7 +584,10 @@ func (rf *Raft) SendAppendEntriestoAll() {
 		}
 		replyVar := reply
 		argsVar := args
+		rf.mu.Lock()
 		argsVar.PrevLogIndex = rf.nextIndex[i] - 1
+		argsVar.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+		rf.mu.Unlock()
 		go rf.SendAppendEntriesRPC(i, &args, &replyVar)
 	}
 }
@@ -649,10 +651,11 @@ func (rf *Raft) updateLastApplied() {
 }
 
 func (rf *Raft) updateCommitIndex() {
+	DPrintf("Server %d: Inside updateCommitIndex", rf.me)
 	for {
 		rf.mu.Lock()
 		if rf.state != "Leader" {
-			// DPrintf("updateCommitIndex is exiting")
+			DPrintf("Server %d: updateCommitIndex is EXITING!", rf.me)
 			rf.mu.Unlock()
 			return
 		}
@@ -663,7 +666,7 @@ func (rf *Raft) updateCommitIndex() {
 		for cond {
 			rf.mu.Lock()
 			if rf.state != "Leader" {
-				// DPrintf("updateCommitIndex is exiting")
+				DPrintf("Server %d: updateCommitIndex is EXITING!", rf.me)
 				rf.mu.Unlock()
 				return
 			}
@@ -694,7 +697,7 @@ func (rf *Raft) updateCommitIndex() {
 			if cond {
 				rf.mu.Lock()
 				rf.commitIndex++
-				// DPrintf("Server %d : Updated commitIndex to %d", rf.me, rf.commitIndex)
+				DPrintf("Server %d : Updated commitIndex to %d", rf.me, rf.commitIndex)
 				rf.mu.Unlock()
 				go rf.applyLog()
 				break
@@ -716,7 +719,7 @@ func (rf *Raft) Run() {
 
 		if currentState == "Leader" {
 			go rf.SendAppendEntriestoAll() // this should just send an heartbeat or should it?
-			time.Sleep(time.Millisecond * 100)
+			time.Sleep(time.Millisecond * 50)
 		}
 
 		if currentState == "Follower" {
