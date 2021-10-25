@@ -235,7 +235,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		reply.ConflictingIndex = len(rf.log)
-		DPrintf("Server %d: AppendEntries rejected because of older term: %d vs %d", rf.me, rf.currentTerm, args.Term)
+		DPrintf("Server %d: AppendEntries rejected because of older term (Follower Term: %d vs Append Entry Log term: %d)", rf.me, rf.currentTerm, args.Term)
 		return
 	}
 
@@ -270,7 +270,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else {
 		if len(args.Entries) > 0 {
-			DPrintf("Server %d: Appending new log. Args length: %d. Old log: %v, PrevLogIndex: %d", rf.me, len(args.Entries), rf.log, args.PrevLogIndex)
+			DPrintf("Server %d: Appending new logs from leader", rf.me)
+			// DPrintf("Server %d: Appending new log. Args length: %d. Old log: %v, PrevLogIndex: %d", rf.me, len(args.Entries), rf.log, args.PrevLogIndex)
 			rf.log = rf.log[:args.PrevLogIndex+1]
 			rf.log = append(rf.log, args.Entries...)
 		}
@@ -332,7 +333,7 @@ func (rf *Raft) SendAppendEntries(i int) {
 	for {
 		rf.mu.Lock()
 		if rf.state != "Leader" {
-			DPrintf("Returning")
+			// DPrintf("Returning")
 			rf.mu.Unlock()
 			return
 		}
@@ -366,14 +367,14 @@ func (rf *Raft) SendAppendEntries(i int) {
 			// for _, r := range logEntries {
 			// 	args.Entries = append(args.Entries, r)
 			// }
-			DPrintf("Server %d (Leader): Sending AppendEntries for term %d, nextIndex: %d", rf.me, args.Term, rf.nextIndex[i])
+			// DPrintf("Server %d (Leader): Sending AppendEntries for term %d, nextIndex: %d", rf.me, args.Term, rf.nextIndex[i])
 			// DPrintf("Args entries length for server %d: %d ", i, len(args.Entries))
 			// DPrintf("Args entries : %v", args.Entries)
 
 			args.LeaderCommit = rf.commitIndex
 			rf.mu.Unlock()
-			DPrintf("Server %d (Leader) sending append entries to server %d", rf.me, i)
-			DPrintf("Server %d to %d: NextIndex is %d, sending log entries: %v", rf.me, i, rf.nextIndex[i], args.Entries)
+			DPrintf("Server %d (Leader) sending append entries to server %d for term %d, nextIndex: %d", rf.me, i, args.Term, rf.nextIndex[i])
+			// DPrintf("Server %d to %d: NextIndex is %d, sending log entries: %v", rf.me, i, rf.nextIndex[i], args.Entries)
 			rf.SendAppendEntriesRPC(i, &args, &reply)
 			rf.mu.Lock()
 			if rf.state != "Leader" {
@@ -382,7 +383,7 @@ func (rf *Raft) SendAppendEntries(i int) {
 				return
 			}
 			rf.mu.Unlock()
-			DPrintf("Response received from AppendEntries of %d: %v", i, reply.Success)
+			// DPrintf("Response received from AppendEntries of %d: %v", i, reply.Success)
 			if reply.Success {
 				rf.mu.Lock()
 				rf.nextIndex[i] = lastLogIndex + 1
@@ -621,7 +622,7 @@ func (rf *Raft) sendVoteRequests() {
 	args.CandidateId = rf.me
 	args.Term = rf.currentTerm
 	args.LastLogIndex = len(rf.log) - 1
-	// DPrintf("Server %d (Candidate) : Log length %d, sending vote request to peers", rf.me, len(rf.log))
+	DPrintf("Server %d (Candidate) : Sending vote request to peers for term: %d", rf.me, rf.currentTerm)
 	args.LastLogTerm = rf.log[len(rf.log)-1].Term
 	me := rf.me
 	rf.mu.Unlock()
@@ -651,11 +652,11 @@ func (rf *Raft) updateLastApplied() {
 }
 
 func (rf *Raft) updateCommitIndex() {
-	DPrintf("Server %d: Inside updateCommitIndex", rf.me)
+	// DPrintf("Server %d: Inside updateCommitIndex", rf.me)
 	for {
 		rf.mu.Lock()
 		if rf.state != "Leader" {
-			DPrintf("Server %d: updateCommitIndex is EXITING!", rf.me)
+			// DPrintf("Server %d: updateCommitIndex is EXITING!", rf.me)
 			rf.mu.Unlock()
 			return
 		}
@@ -666,7 +667,7 @@ func (rf *Raft) updateCommitIndex() {
 		for cond {
 			rf.mu.Lock()
 			if rf.state != "Leader" {
-				DPrintf("Server %d: updateCommitIndex is EXITING!", rf.me)
+				// DPrintf("Server %d: updateCommitIndex is EXITING!", rf.me)
 				rf.mu.Unlock()
 				return
 			}
@@ -742,6 +743,7 @@ func (rf *Raft) Run() {
 			rf.voteRecieved = 1
 			rf.currentTerm++
 			rf.mu.Unlock()
+			// DPrintf("Server %d sending vote requests to all peers", rf.me)
 			go rf.sendVoteRequests()
 			/*
 				a candidate can recive:
