@@ -661,6 +661,10 @@ func (rf *Raft) updateCommitIndex() {
 			return
 		}
 
+		N := rf.commitIndex + 1
+		for N < len(rf.log) && rf.log[N].Term != rf.currentTerm {
+			N++
+		}
 		rf.mu.Unlock()
 		cond := true
 
@@ -671,9 +675,9 @@ func (rf *Raft) updateCommitIndex() {
 				rf.mu.Unlock()
 				return
 			}
-			n := rf.commitIndex + 1
+			// n := rf.commitIndex + 1
 			// DPrintf("Checking if %d can update commitIndex to %d", rf.me, n)
-			if n >= len(rf.log) {
+			if N >= len(rf.log) {
 				rf.mu.Unlock()
 				break
 			}
@@ -687,14 +691,15 @@ func (rf *Raft) updateCommitIndex() {
 					cnt++
 					continue
 				}
-				if r >= n {
+				if r >= N {
 					cnt++
 				}
 			}
 			rf.mu.Lock()
 			cond = cond && (cnt > (len(rf.peers) / 2))
-			cond = cond && (rf.log[n].Term == rf.currentTerm)
+			// cond = cond && (rf.log[n].Term == rf.currentTerm)
 			rf.mu.Unlock()
+
 			if cond {
 				rf.mu.Lock()
 				rf.commitIndex++
