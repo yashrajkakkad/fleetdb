@@ -18,11 +18,14 @@ package raft
 //
 
 import (
+	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/yashrajkakkad/fleetdb/labgob"
 	"github.com/yashrajkakkad/fleetdb/labrpc"
 )
 
@@ -114,12 +117,17 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	// rf.mu.Lock()
+	_ = e.Encode(rf.currentTerm)
+	_ = e.Encode(rf.votedFor)
+	_ = e.Encode(rf.log)
+	// rf.mu.Unlock()
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -131,17 +139,24 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm int
+	var votedFor int
+	var raftLog []Log
+
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&raftLog) != nil {
+		log.Fatalln("Error in decoding persisted data")
+	} else {
+		rf.mu.Lock()
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = raftLog
+		rf.mu.Unlock()
+	}
 }
 
 //
@@ -200,11 +215,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.state = "Follower"
 		rf.votedFor = -1
+		// rf.persist()
 	}
 
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isLogUptodate(args.LastLogIndex, args.LastLogTerm) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		// rf.persist()
 	}
 }
 
@@ -249,6 +266,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.state = "Follower"
 		rf.votedFor = -1
+		// rf.persist()
 	}
 
 	reply.ConflictingIndex = -1
@@ -264,6 +282,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	matchTerm := rf.log[args.PrevLogIndex].Term
+	// log doesn't contain an entry at prevLogIndex. Inconsistency. Back off
+	// if args.PrevLogIndex > 0 && matchTerm != args.PrevLogTerm {
+	if matchTerm != args.PrevLogTerm {
+		for i := args.PrevLogIndex; i >= 0 && rf.log[i].Term == matchTerm; i-- {
+			reply.ConflictingIndex = i
+		}
+		DPrintf("Server %d : Conflict at term %d", rf.me, matchTerm)
+		return
+	} else {
+		if len(args.Entries) > 0 {
+			DPrintf("Server %d: Appending new logs from leader", rf.me)
+			// DPrintf("Server %d: Appending new log. Args length: %d. Old log: %v, PrevLogIndex: %d", rf.me, len(args.Entries), rf.log, args.PrevLogIndex)
+			rf.log = rf.log[:args.PrevLogIndex+1]
+			rf.log = append(rf.log, args.Entries...)
+			rf.persist()
+		}
+		// DPrintf("Server %d: Log Length: %d", rf.me, len(rf.log))
+		// DPrintf("Server %d: Log Length: %d", rf.me, len(rf.log))
+		reply.Success = true
+		reply.ConflictingIndex = args.PrevLogIndex + len(args.Entries)
 
 	// Rewrite
 	if matchTerm != args.PrevLogTerm {
@@ -379,6 +417,7 @@ func (rf *Raft) SendAppendEntriesRPC(server int, args *AppendEntriesArgs, reply 
 			rf.currentTerm = reply.Term
 			rf.state = "Follower"
 			rf.votedFor = -1
+			// rf.persist()
 			return ok
 		}
 	}
@@ -505,6 +544,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.currentTerm = reply.Term
 			rf.state = "Follower"
 			rf.votedFor = -1
+			// rf.persist()
 			return ok
 		}
 		// if we receive major votes, --> leader
@@ -545,6 +585,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.currentTerm
 	isLeader := (rf.state == "Leader")
 
+	// DPrintf("Start %v %d: Command received = %v, Current term = %v, Voted for = %v", rf.state, rf.me, command, rf.currentTerm, rf.votedFor)
+
 	// Your code here (2B).
 	if !isLeader {
 		// DPrintf("Exiting from Start")
@@ -557,6 +599,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, log)
+	// rf.persist()
 	// DPrintf("Exiting from Start as leader")
 	DPrintf("\nServer %d (Leader): Log at Start() %v", rf.me, rf.log)
 	DPrintf("Server %d (Leader): Command received from client. New log length %d. Command from client is: %v", rf.me, len(rf.log), command)
@@ -675,6 +718,7 @@ func (rf *Raft) becameLeader() {
 		if i == me {
 			continue
 		}
+		// rf.persist()
 		go rf.SendAppendEntries(i)
 	}
 	go rf.updateCommitIndex()
@@ -805,6 +849,7 @@ func (rf *Raft) updateCommitIndex() {
 				rf.mu.Lock()
 				rf.commitIndex++
 				DPrintf("Server %d : Updated commitIndex to %d", rf.me, rf.commitIndex)
+				rf.persist()
 				rf.mu.Unlock()
 				DPrintf("\n 2) apply log called from server %d: ", rf.me)
 				go rf.applyLog()
@@ -826,6 +871,7 @@ func (rf *Raft) Run() {
 		go rf.updateLastApplied()
 
 		if currentState == "Leader" {
+			// rf.persist()
 			go rf.SendAppendEntriestoAll() // this should just send an heartbeat or should it?
 			time.Sleep(time.Millisecond * 100)
 		}
@@ -851,6 +897,7 @@ func (rf *Raft) Run() {
 			rf.currentTerm++
 			rf.mu.Unlock()
 			// DPrintf("Server %d sending vote requests to all peers", rf.me)
+			// rf.persist()
 			go rf.sendVoteRequests()
 			/*
 				a candidate can recive:
