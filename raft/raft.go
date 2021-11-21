@@ -267,6 +267,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Rewrite
 	if matchTerm != args.PrevLogTerm {
+		for i := args.PrevLogIndex; i >= 0 && rf.log[i].Term == matchTerm; i-- {
+			reply.ConflictingIndex = i
+		}
 		reply.Success = false
 		DPrintf("Server %d: AppendEntries rejected as log doesn't contain entry at prevLogIndex whose term matches prevLogTerm", rf.me)
 		return
@@ -454,8 +457,11 @@ func (rf *Raft) SendAppendEntries(i int) {
 				// DPrintf("Lock acquired by SendAppendEntriesRPC ok =false")
 				rf.mu.Lock()
 				DPrintf("Decrementing nextIndex, reply is false!")
-				if rf.nextIndex[i] > 1 {
-					rf.nextIndex[i]--
+				// if rf.nextIndex[i] > 1 {
+				// 	rf.nextIndex[i]--
+				// }
+				if reply.ConflictingIndex >= 1 {
+					rf.nextIndex[i] = reply.ConflictingIndex
 				}
 				rf.mu.Unlock()
 			}
