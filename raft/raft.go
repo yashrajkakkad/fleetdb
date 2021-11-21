@@ -283,7 +283,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// }
 
 	// Append any new entries not in the log
-	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+	// rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+
+	i, j := args.PrevLogIndex+1, 0
+	for ; i < len(rf.log) && j < len(args.Entries); i, j = i+1, j+1 {
+		if rf.log[i].Term != args.Entries[j].Term {
+			break
+		}
+	}
+	rf.log = rf.log[:i]
+	args.Entries = args.Entries[j:]
+	rf.log = append(rf.log, args.Entries...)
+
 	if len(rf.log) < rf.commitIndex {
 		print("log smaller than commit index!")
 	}
@@ -706,6 +717,41 @@ func (rf *Raft) updateLastApplied() {
 	}
 }
 
+func (rf *Raft) updateCommitIndex2() {
+	for {
+		rf.mu.Lock()
+		if rf.state != "Leader" {
+			rf.mu.Unlock()
+			return
+		}
+		for i := len(rf.log) - 1; i > rf.commitIndex; i-- {
+			cnt := 0
+			if rf.currentTerm != rf.log[i].Term {
+				continue
+			}
+			for i, r := range rf.matchIndex {
+				if i == rf.me {
+					cnt++
+					continue
+				}
+				if r >= i {
+					cnt++
+				}
+			}
+			if rf.state != "Leader" {
+				rf.mu.Unlock()
+				return
+			}
+			if cnt > (len(rf.peers) / 2) {
+				rf.commitIndex = i
+				go rf.applyLog()
+			}
+		}
+		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func (rf *Raft) updateCommitIndex() {
 	// DPrintf("Server %d: Inside updateCommitIndex", rf.me)
 	for {
@@ -738,7 +784,7 @@ func (rf *Raft) updateCommitIndex() {
 			}
 			matchIndex := rf.matchIndex
 			me := rf.me
-			rf.mu.Unlock()
+			// rf.mu.Unlock()
 			cnt := 0
 
 			for i, r := range matchIndex {
@@ -750,7 +796,7 @@ func (rf *Raft) updateCommitIndex() {
 					cnt++
 				}
 			}
-			rf.mu.Lock()
+			// rf.mu.Lock()
 			cond = cond && (cnt > (len(rf.peers) / 2))
 			// cond = cond && (rf.log[n].Term == rf.currentTerm)
 			rf.mu.Unlock()
@@ -765,7 +811,7 @@ func (rf *Raft) updateCommitIndex() {
 				break
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 
 	}
 }
@@ -781,7 +827,7 @@ func (rf *Raft) Run() {
 
 		if currentState == "Leader" {
 			go rf.SendAppendEntriestoAll() // this should just send an heartbeat or should it?
-			time.Sleep(time.Millisecond * 50)
+			time.Sleep(time.Millisecond * 100)
 		}
 
 		if currentState == "Follower" {
