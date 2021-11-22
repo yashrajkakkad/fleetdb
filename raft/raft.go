@@ -418,8 +418,13 @@ func (rf *Raft) SendAppendEntries(i int) {
 			rf.mu.Lock()
 			args.Term = rf.currentTerm
 			args.LeaderId = rf.me
-			args.PrevLogIndex = rf.nextIndex[i] - 1
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+			if rf.nextIndex[i] > lastLogIndex {
+				args.PrevLogIndex = lastLogIndex
+				args.PrevLogTerm = rf.log[lastLogIndex].Term
+			} else {
+				args.PrevLogIndex = rf.nextIndex[i] - 1
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+			}
 			DPrintf("not a heartbeat, args.PrevLogIndex: %v, args.PrevLogTerm: %v", args.PrevLogIndex, args.PrevLogTerm)
 			// if args.PrevLogIndex >= 0 {
 			// 	args.Term = rf.log[args.PrevLogIndex].Term
