@@ -303,92 +303,93 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		reply.ConflictingIndex = args.PrevLogIndex + len(args.Entries)
 
-	// Rewrite
-	if matchTerm != args.PrevLogTerm {
-		reply.Success = false
-		DPrintf("Server %d: AppendEntries rejected as log doesn't contain entry at prevLogIndex whose term matches prevLogTerm", rf.me)
-		return
-	}
-
-	// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
-	// for i, _ := range args.Entries {
-	// 	index := i + args.PrevLogIndex + 1
-	// 	if index < len(rf.log) && rf.log[index].Term != args.Entries[i].Term {
-	// 		// Delete
-	// 		rf.log = rf.log[:index]
-	// 		break
-	// 	}
-	// }
-
-	// Append any new entries not in the log
-	// rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-
-	i, j := args.PrevLogIndex+1, 0
-	for ; i < len(rf.log) && j < len(args.Entries); i, j = i+1, j+1 {
-		if rf.log[i].Term != args.Entries[j].Term {
-			break
+		// Rewrite
+		if matchTerm != args.PrevLogTerm {
+			reply.Success = false
+			DPrintf("Server %d: AppendEntries rejected as log doesn't contain entry at prevLogIndex whose term matches prevLogTerm", rf.me)
+			return
 		}
-	}
-	rf.log = rf.log[:i]
-	args.Entries = args.Entries[j:]
-	rf.log = append(rf.log, args.Entries...)
 
-	if len(rf.log) < rf.commitIndex {
-		print("log smaller than commit index!")
-	}
-	reply.Success = true
-	// Rewrite ends
-	// log doesn't contain an entry at prevLogIndex. Inconsistency. Back off
-	// if args.PrevLogIndex > 0 && matchTerm != args.PrevLogTerm {
-	// DPrintf("\nServer %d: Match Term: %v, args.PrevLogTerm: %v", rf.me, matchTerm, args.PrevLogTerm) // 0
+		// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
+		// for i, _ := range args.Entries {
+		// 	index := i + args.PrevLogIndex + 1
+		// 	if index < len(rf.log) && rf.log[index].Term != args.Entries[i].Term {
+		// 		// Delete
+		// 		rf.log = rf.log[:index]
+		// 		break
+		// 	}
+		// }
 
-	// heartbeat and server is in sync with leader then apply logs
-	// if matchTerm != args.PrevLogTerm {
-	// 	for i := args.PrevLogIndex; i >= 0 && rf.log[i].Term == matchTerm; i-- {
-	// 		reply.ConflictingIndex = i
-	// 	}
-	// 	DPrintf("Server %d : Conflict at term %d", rf.me, matchTerm)
-	// 	DPrintf("Server %d: Conflicting Index: %d", rf.me, reply.ConflictingIndex)
-	// 	// return
-	// } else {
-	// 	// in sync
-	// 	// check if not hearbeat
-	// 	if len(args.Entries) > 0 {
-	// 		DPrintf("Server %d: Appending new logs from leader", rf.me)
-	// 		// DPrintf("Server %d: Appending new log. Args length: %d. Old log: %v, PrevLogIndex: %d", rf.me, len(args.Entries), rf.log, args.PrevLogIndex)
-	// 		rf.log = rf.log[:args.PrevLogIndex+1]
-	// 		rf.log = append(rf.log, args.Entries...)
-	// 		DPrintf("\nServer %d: Log after appending: %v", rf.me, rf.log)
-	// 	}
-	// 	// DPrintf("Server %d: Log Length: %d", rf.me, len(rf.log))
-	// 	// DPrintf("Server %d: Log Length: %d", rf.me, len(rf.log))
-	// 	reply.Success = true
-	// 	reply.ConflictingIndex = args.PrevLogIndex + len(args.Entries)
+		// Append any new entries not in the log
+		// rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 
-	// 	// DPrintf("Server %d : Log length after AppendEntries is %d", rf.me, len(rf.log))
-	// 	// DPrintf("%d : Synced log length %d", rf.me, len(rf.log))
-	// 	// if args.LeaderCommit > rf.commitIndex {
-	// 	// 	if args.LeaderCommit < len(rf.log)-1 {
-	// 	// 		rf.commitIndex = args.LeaderCommit
-	// 	// 	} else {
-	// 	// 		rf.commitIndex = len(rf.log) - 1
-	// 	// 	}
-	// 	// 	// DPrintf("Server %d: commitIndex: %d", rf.me, rf.commitIndex)
-	// 	// 	DPrintf("\nCalling apply Log from server: %d", rf.me)
-	// 	// 	go rf.applyLog()
-	// 	// }
-	// }
-	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit < len(rf.log)-1 {
-			rf.commitIndex = args.LeaderCommit
-		} else {
-			rf.commitIndex = len(rf.log) - 1
+		i, j := args.PrevLogIndex+1, 0
+		for ; i < len(rf.log) && j < len(args.Entries); i, j = i+1, j+1 {
+			if rf.log[i].Term != args.Entries[j].Term {
+				break
+			}
 		}
-		// DPrintf("Server %d: commitIndex: %d", rf.me, rf.commitIndex)
-		DPrintf("\nCalling apply Log from server: %d", rf.me)
-		go rf.applyLog()
-	}
+		rf.log = rf.log[:i]
+		args.Entries = args.Entries[j:]
+		rf.log = append(rf.log, args.Entries...)
 
+		// if len(rf.log) < rf.commitIndex {
+		// 	print("log smaller than commit index!")
+		// }
+		reply.Success = true
+		// Rewrite ends
+		// log doesn't contain an entry at prevLogIndex. Inconsistency. Back off
+		// if args.PrevLogIndex > 0 && matchTerm != args.PrevLogTerm {
+		// DPrintf("\nServer %d: Match Term: %v, args.PrevLogTerm: %v", rf.me, matchTerm, args.PrevLogTerm) // 0
+
+		// heartbeat and server is in sync with leader then apply logs
+		// if matchTerm != args.PrevLogTerm {
+		// 	for i := args.PrevLogIndex; i >= 0 && rf.log[i].Term == matchTerm; i-- {
+		// 		reply.ConflictingIndex = i
+		// 	}
+		// 	DPrintf("Server %d : Conflict at term %d", rf.me, matchTerm)
+		// 	DPrintf("Server %d: Conflicting Index: %d", rf.me, reply.ConflictingIndex)
+		// 	// return
+		// } else {
+		// 	// in sync
+		// 	// check if not hearbeat
+		// 	if len(args.Entries) > 0 {
+		// 		DPrintf("Server %d: Appending new logs from leader", rf.me)
+		// 		// DPrintf("Server %d: Appending new log. Args length: %d. Old log: %v, PrevLogIndex: %d", rf.me, len(args.Entries), rf.log, args.PrevLogIndex)
+		// 		rf.log = rf.log[:args.PrevLogIndex+1]
+		// 		rf.log = append(rf.log, args.Entries...)
+		// 		DPrintf("\nServer %d: Log after appending: %v", rf.me, rf.log)
+		// 	}
+		// 	// DPrintf("Server %d: Log Length: %d", rf.me, len(rf.log))
+		// 	// DPrintf("Server %d: Log Length: %d", rf.me, len(rf.log))
+		// 	reply.Success = true
+		// 	reply.ConflictingIndex = args.PrevLogIndex + len(args.Entries)
+
+		// 	// DPrintf("Server %d : Log length after AppendEntries is %d", rf.me, len(rf.log))
+		// 	// DPrintf("%d : Synced log length %d", rf.me, len(rf.log))
+		// 	// if args.LeaderCommit > rf.commitIndex {
+		// 	// 	if args.LeaderCommit < len(rf.log)-1 {
+		// 	// 		rf.commitIndex = args.LeaderCommit
+		// 	// 	} else {
+		// 	// 		rf.commitIndex = len(rf.log) - 1
+		// 	// 	}
+		// 	// 	// DPrintf("Server %d: commitIndex: %d", rf.me, rf.commitIndex)
+		// 	// 	DPrintf("\nCalling apply Log from server: %d", rf.me)
+		// 	// 	go rf.applyLog()
+		// 	// }
+		// }
+		if args.LeaderCommit > rf.commitIndex {
+			if args.LeaderCommit < len(rf.log)-1 {
+				rf.commitIndex = args.LeaderCommit
+			} else {
+				rf.commitIndex = len(rf.log) - 1
+			}
+			// DPrintf("Server %d: commitIndex: %d", rf.me, rf.commitIndex)
+			DPrintf("\nCalling apply Log from server: %d", rf.me)
+			go rf.applyLog()
+		}
+
+	}
 }
 
 func (rf *Raft) applyLog() {
