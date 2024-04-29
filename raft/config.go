@@ -181,6 +181,9 @@ func (cfg *config) start1(i int) {
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 						// some server has already committed a different value for this entry!
+						fmt.Printf("%v\n", cfg.logs[j][m.CommandIndex])
+						fmt.Printf("old: %v\n", old)
+						fmt.Printf("v: %v\n", v)
 						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 							m.CommandIndex, i, m.Command, j, old)
 					}
